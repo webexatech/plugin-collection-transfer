@@ -347,12 +347,18 @@ describe('collection importer', () => {
 
     const tampered = await importer.preview(token);
     expect(tampered.missingPlugins).toEqual(['@nocobase/plugin-field-code']);
-    expect(tampered.problems).toContainEqual({
+    // Expressions are listed for the admin to confirm, not refused outright.
+    expect(tampered.problems).toEqual([]);
+    expect(tampered.expressions).toContainEqual({
       code: 'unsafeExpression',
       collection: 'projects',
       detail: '{{ alert(document.cookie) }}',
     });
-    await expect(importer.import(token)).rejects.toBeInstanceOf(ImportBlockedError);
+    await expect(importer.import(token)).rejects.toMatchObject({
+      problems: [expect.objectContaining({ code: 'expressionsNotConfirmed' })],
+    });
+    const result = await importer.import(token, { trustExpressions: true });
+    expect(result.collections).toContain('projects');
   });
 
   it('refuses packages that would change collections or tables outside the package', async () => {

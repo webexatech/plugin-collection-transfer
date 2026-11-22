@@ -58,6 +58,8 @@ export interface DataMeta {
   columns: string[];
   count: number;
   autoIncrementColumn: string | null;
+  /** Column → field (attribute) name; absent in packages from 0.1.4 and earlier. */
+  attributes?: Record<string, string>;
 }
 
 export interface Manifest {

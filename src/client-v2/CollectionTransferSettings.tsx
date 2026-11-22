@@ -5,6 +5,7 @@ import {
   Radio,
   Button,
   Card,
+  Checkbox,
   Descriptions,
   Space,
   Switch,
@@ -119,6 +120,7 @@ interface Preview {
   interfaces: PreviewInterface[];
   missingPlugins: string[];
   conflicts: PreviewConflict[];
+  expressions: Problem[];
 }
 
 interface ImportResult {
@@ -190,7 +192,16 @@ function problemMessage(t: Translate, problem: Problem) {
     case 'outsidePackage':
       return t('"{{collection}}" would change something outside the package: {{detail}}', values);
     case 'unsafeExpression':
-      return t('"{{collection}}" contains an expression that is not allowed in a package: {{detail}}', values);
+      return problem.field
+        ? t('"{{collection}}.{{field}}": {{detail}}', values)
+        : t('"{{collection}}": {{detail}}', values);
+    case 'missingPrimaryKey':
+      return t(
+        '"{{collection}}" has no primary key field in this file; export it again with plugin 0.1.5 or later',
+        values,
+      );
+    case 'expressionsNotConfirmed':
+      return t('Confirm that you trust this file before importing its expressions', values);
     case 'invalidName':
       return t('Collection name "{{collection}}" is not valid', values);
     default:
@@ -409,6 +420,7 @@ const ImportPanel: React.FC = () => {
   const [confirming, setConfirming] = useState(false);
   const [preview, setPreview] = useState<Preview>();
   const [resolutions, setResolutions] = useState<Record<string, ConflictMode>>({});
+  const [trusted, setTrusted] = useState(false);
   const [result, setResult] = useState<ImportResult>();
   const [error, setError] = useState<string>();
 
@@ -425,6 +437,7 @@ const ImportPanel: React.FC = () => {
 
   const includeData = !!preview?.manifest.includeData;
   const conflicts = preview?.conflicts || [];
+  const expressions = preview?.expressions || [];
   const overridden = conflicts.filter((conflict) => OVERRIDE_MODES.includes(resolutions[conflict.name]));
   // Collections recreated by this import: new ones plus overridden ones. Fields elsewhere that point at an overridden
   // collection are removed by NocoBase unless their own collection is recreated here too.
@@ -441,6 +454,7 @@ const ImportPanel: React.FC = () => {
   const reset = () => {
     setPreview(undefined);
     setResolutions({});
+    setTrusted(false);
     setResult(undefined);
     setError(undefined);
   };
@@ -452,6 +466,7 @@ const ImportPanel: React.FC = () => {
       defaults[conflict.name] = next.manifest.includeData ? 'overrideAll' : 'overrideSchema';
     }
     setResolutions(defaults);
+    setTrusted(false);
   };
 
   const uploadPackage: UploadProps['customRequest'] = async ({ file, onSuccess, onError }) => {
@@ -480,7 +495,7 @@ const ImportPanel: React.FC = () => {
       const { data } = await api.request({
         url: 'collectionTransfer:import',
         method: 'post',
-        data: { token: preview.token, resolutions },
+        data: { token: preview.token, resolutions, trustExpressions: trusted },
       });
       setResult(data?.data as ImportResult);
       setPreview(undefined);
@@ -626,6 +641,30 @@ const ImportPanel: React.FC = () => {
               pagination={false}
             />
 
+            {expressions.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message={t(
+                  'This file contains expressions that NocoBase evaluates when it shows these titles or descriptions',
+                )}
+                description={
+                  <Space direction="vertical" size={4}>
+                    <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+                      {expressions.map((item) => (
+                        <li key={`${item.collection}-${item.field}-${item.detail}`}>
+                          <Typography.Text code>{problemMessage(t, item)}</Typography.Text>
+                        </li>
+                      ))}
+                    </ul>
+                    <span>{t('Only import files from environments you trust.')}</span>
+                    <Checkbox checked={trusted} onChange={(event) => setTrusted(event.target.checked)}>
+                      {t('I trust this file and want to import these expressions')}
+                    </Checkbox>
+                  </Space>
+                }
+              />
+            )}
             {conflicts.length > 0 && (
               <Space direction="vertical" size="small" style={{ width: '100%' }}>
                 <Typography.Title level={5} style={{ margin: 0 }}>
@@ -678,7 +717,12 @@ const ImportPanel: React.FC = () => {
             )}
 
             <Space>
-              <Button type="primary" onClick={handleImport} loading={importing} disabled={problems.length > 0}>
+              <Button
+                type="primary"
+                onClick={handleImport}
+                loading={importing}
+                disabled={problems.length > 0 || (expressions.length > 0 && !trusted)}
+              >
                 {t('Import')}
               </Button>
               <Button onClick={reset} disabled={importing}>

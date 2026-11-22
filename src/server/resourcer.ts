@@ -136,7 +136,7 @@ export default {
     },
 
     async import(ctx: Context, next: Next) {
-      const { token, resolutions: rawResolutions } = ctx.action.params.values || {};
+      const { token, resolutions: rawResolutions, trustExpressions } = ctx.action.params.values || {};
       // Only known modes for valid names are passed on; anything else counts as unresolved.
       const resolutions: Record<string, ConflictMode> = {};
       if (rawResolutions && typeof rawResolutions === 'object' && !Array.isArray(rawResolutions)) {
@@ -150,7 +150,11 @@ export default {
 
       try {
         const userId = (ctx.state.currentUser as { id?: string | number } | undefined)?.id ?? null;
-        ctx.body = await new CollectionImporter(ctx.app).import(token, { userId, resolutions });
+        ctx.body = await new CollectionImporter(ctx.app).import(token, {
+          userId,
+          resolutions,
+          trustExpressions: trustExpressions === true,
+        });
       } catch (error) {
         if (error instanceof ImportBlockedError) {
           ctx.status = 409;

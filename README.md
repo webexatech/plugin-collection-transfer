@@ -12,9 +12,9 @@ NocoBase version:
 
 | NocoBase | Plugin version | npm tag | Tested on |
 | --- | --- | --- | --- |
-| 2.1.x | `0.1.4-nocobase.2.1` | `nocobase-2.1` | 2.1.39 |
-| 2.2.x | `0.1.4` | `nocobase-2.2`, `latest` | 2.2.50 |
-| 2.3.x (beta) | `0.1.4-nocobase.2.3` | `nocobase-2.3` | 2.3.0-beta.26 |
+| 2.1.x | `0.1.5-nocobase.2.1` | `nocobase-2.1` | 2.1.39 |
+| 2.2.x | `0.1.5` | `nocobase-2.2`, `latest` | 2.2.50 |
+| 2.3.x (beta) | `0.1.5-nocobase.2.3` | `nocobase-2.3` | 2.3.0-beta.26 |
 
 All builds: PostgreSQL and MySQL/MariaDB, including transfers between them (e.g. MySQL → PostgreSQL; tested with
 PostgreSQL 16 and MySQL 8); settings page in the classic (`/admin`) and the new (`/v/admin`) admin UI.
@@ -25,7 +25,7 @@ Use the build for your NocoBase version (table above). Then enable **Collection 
 
 - **URL (any NocoBase version):** *Plugin manager → Add & update → URL*, paste the npm file for your version:
   `https://registry.npmjs.org/@webexatech/plugin-collection-transfer/-/plugin-collection-transfer-<plugin version>.tgz`
-  (e.g. `…/plugin-collection-transfer-0.1.4-nocobase.2.1.tgz`).
+  (e.g. `…/plugin-collection-transfer-0.1.5-nocobase.2.1.tgz`).
 - **Upload:** *Plugin manager → Add & update → Upload*, choose the `.tgz` for your NocoBase version from the GitHub
   release.
 - **npm registry (NocoBase 2.2.x only):** *Plugin manager → Add & update → npm registry*, package
@@ -85,8 +85,9 @@ The import is blocked when:
 - a database table with the same name exists without a collection, or a collection uses an unsupported template
 - the file has an unsupported format version, or a name is too long for the database
 - the file tries to change anything outside its own collections (other tables, fields on other collections)
-- a title, description or UI schema contains a `{{ }}` expression other than a plain `{{t("…")}}` translation (values
-  such as formula expressions are not affected)
+- (needs confirmation) a title, description or UI schema contains a `{{ }}` expression other than a plain
+  `{{t("…")}}` translation; the preview lists them and the import runs only after you tick **I trust this file**
+  (formula expressions themselves are not affected)
 - the file is not a valid package
 
 The same checks run again when you click **Import**, in case the target changed after the preview.
@@ -106,6 +107,7 @@ FDW and expression collections are listed but cannot be selected.
 
 ## Known limitations
 
+- Source and target may use different column naming (`DB_UNDERSCORED`); columns are matched by field name.
 - Only the main data source. Supported databases: PostgreSQL and MySQL/MariaDB (SQLite is not supported).
 - Primary-key conflicts are resolved per collection (skip or override), not per row; rows are not merged.
 - Sequence counters, encrypted fields, sort scopes, custom primary keys and indexes defined in collection options are

@@ -2,6 +2,18 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.1.5
+
+- **Expressions in titles and descriptions** (e.g. formula notes like `({{VTOTALBASE}} || 0)` in a field description) no
+  longer block the import: the preview lists them and the import runs after you confirm **I trust this file**.
+- Fixed: collections without generated id lost their primary key on export when the key was also used as a foreign key
+  (e.g. a belongsTo with foreignKey `id`); the import then failed with `Unknown attribute "id" passed as targetKey`.
+  Older packages with this problem are now reported in the preview.
+- Fixed: export failed with `Through collection … not found` for many-to-many relations whose junction table has no
+  collection-manager row (older installations, synced tables); such junction tables are transferred now.
+- Fixed: import between installations with different column naming (`DB_UNDERSCORED`): columns are matched by field
+  name.
+
 ## 0.1.4
 
 - **Transfers between database types**: a package exported from MySQL/MariaDB can be imported into PostgreSQL and the

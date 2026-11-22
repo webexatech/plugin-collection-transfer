@@ -1,5 +1,4 @@
 {
-  "\"{{collection}}\" contains an expression that is not allowed in a package: {{detail}}": "\"{{collection}}\" contains an expression that is not allowed in a package: {{detail}}",
   "\"{{collection}}\" here lacks columns from the file ({{detail}}), so its data cannot be added": "\"{{collection}}\" here lacks columns from the file ({{detail}}), so its data cannot be added",
   "\"{{collection}}\" would change something outside the package: {{detail}}": "\"{{collection}}\" would change something outside the package: {{detail}}",
   "A database table for \"{{collection}}\" already exists in this environment": "A database table for \"{{collection}}\" already exists in this environment",
@@ -70,5 +69,12 @@
   "The selected collections have relations to collections that are not selected: {{names}}": "The selected collections have relations to collections that are not selected: {{names}}",
   "The import refuses relations to collections that are neither in the file nor in the target.": "The import refuses relations to collections that are neither in the file nor in the target.",
   "These cannot be transferred and must already exist in the target: {{names}}": "These cannot be transferred and must already exist in the target: {{names}}",
-  "Add related collections": "Add related collections"
+  "Add related collections": "Add related collections",
+  "\"{{collection}}.{{field}}\": {{detail}}": "\"{{collection}}.{{field}}\": {{detail}}",
+  "\"{{collection}}\": {{detail}}": "\"{{collection}}\": {{detail}}",
+  "Confirm that you trust this file before importing its expressions": "Confirm that you trust this file before importing its expressions",
+  "This file contains expressions that NocoBase evaluates when it shows these titles or descriptions": "This file contains expressions that NocoBase evaluates when it shows these titles or descriptions",
+  "Only import files from environments you trust.": "Only import files from environments you trust.",
+  "I trust this file and want to import these expressions": "I trust this file and want to import these expressions",
+  "\"{{collection}}\" has no primary key field in this file; export it again with plugin 0.1.5 or later": "\"{{collection}}\" has no primary key field in this file; export it again with plugin 0.1.5 or later"
 }

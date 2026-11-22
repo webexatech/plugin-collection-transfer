@@ -224,9 +224,16 @@ export class CollectionExporter {
 
         const throughRow = rowsByName[throughName];
         if (!throughRow) {
-          throw new Error(
-            `Through collection "${throughName}" of field "${field.collectionName}.${field.name}" not found`,
-          );
+          // Older installations (and synced tables) can have a junction table that is only defined in memory by the
+          // relation, without a collection-manager row. It is treated like an auto-created junction: the importer's
+          // belongsToMany hook recreates it, and its rows are carried.
+          if (!this.db.hasCollection(throughName)) {
+            throw new Error(
+              `Through collection "${throughName}" of field "${field.collectionName}.${field.name}" not found`,
+            );
+          }
+          through.push(throughName);
+          continue;
         }
         if (throughRow.autoCreate) {
           through.push(throughName);
@@ -252,7 +259,11 @@ export class CollectionExporter {
     const collectionPayloads: CollectionPayload[] = collections.map((name) => {
       const row = rowsByName[name];
       const scalarFields = (fieldsByCollection[name] || [])
-        .filter((field) => !ASSOCIATION_TYPES.includes(field.type as string) && !field.isForeignKey)
+        // Key columns created by relations are recreated by NocoBase on import, except a primary key that is also
+        // used as a foreign key (e.g. a belongsTo with foreignKey "id"): without it the collection would have no key.
+        .filter(
+          (field) => !ASSOCIATION_TYPES.includes(field.type as string) && (!field.isForeignKey || field.primaryKey),
+        )
         .map((field) => this.fieldPayload(field));
       return {
         ...(lodash.omit(row, COLLECTION_BOOKKEEPING_KEYS) as Omit<CollectionPayload, 'fields'>),
@@ -341,6 +352,8 @@ export class CollectionExporter {
       columns,
       count,
       autoIncrementColumn: autoIncrementAttribute ? autoIncrementAttribute[1].field || autoIncrementAttribute[0] : null,
+      // Column → field name, so the target can map columns when its naming differs (e.g. DB_UNDERSCORED).
+      attributes: Object.fromEntries(columns.map((column) => [column, columnToAttribute.get(column)])),
     };
     await fsPromises.writeFile(path.join(dir, 'meta'), JSON.stringify(meta), 'utf8');
   }

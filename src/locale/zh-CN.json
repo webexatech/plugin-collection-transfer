@@ -1,5 +1,4 @@
 {
-  "\"{{collection}}\" contains an expression that is not allowed in a package: {{detail}}": "“{{collection}}”包含迁移文件中不允许的表达式：{{detail}}",
   "\"{{collection}}\" here lacks columns from the file ({{detail}}), so its data cannot be added": "当前环境中的“{{collection}}”缺少文件中的字段（{{detail}}），无法添加其数据",
   "\"{{collection}}\" would change something outside the package: {{detail}}": "“{{collection}}”会修改迁移文件之外的内容：{{detail}}",
   "A database table for \"{{collection}}\" already exists in this environment": "当前环境中已存在“{{collection}}”对应的数据库表",
@@ -70,5 +69,12 @@
   "The selected collections have relations to collections that are not selected: {{names}}": "所选数据表与未选择的数据表存在关系：{{names}}",
   "The import refuses relations to collections that are neither in the file nor in the target.": "导入时，指向既不在文件中也不在目标环境中的数据表的关系会被拒绝。",
   "These cannot be transferred and must already exist in the target: {{names}}": "以下数据表无法迁移，必须已存在于目标环境中：{{names}}",
-  "Add related collections": "添加相关数据表"
+  "Add related collections": "添加相关数据表",
+  "\"{{collection}}.{{field}}\": {{detail}}": "\"{{collection}}.{{field}}\": {{detail}}",
+  "\"{{collection}}\": {{detail}}": "\"{{collection}}\": {{detail}}",
+  "Confirm that you trust this file before importing its expressions": "导入其中的表达式之前，请确认您信任此文件",
+  "This file contains expressions that NocoBase evaluates when it shows these titles or descriptions": "此文件包含表达式，NocoBase 在显示这些标题或描述时会对其求值",
+  "Only import files from environments you trust.": "只导入来自您信任的环境的文件。",
+  "I trust this file and want to import these expressions": "我信任此文件，并希望导入这些表达式",
+  "\"{{collection}}\" has no primary key field in this file; export it again with plugin 0.1.5 or later": "此文件中“{{collection}}”没有主键字段；请使用插件 0.1.5 或更高版本重新导出"
 }

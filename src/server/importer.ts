@@ -1,4 +1,4 @@
-import { Collection, Database, RelationField, Transaction } from '@nocobase/database';
+import { Collection, Database, RelationField, snakeCase, Transaction } from '@nocobase/database';
 import { Application } from '@nocobase/server';
 import { storagePathJoin } from '@nocobase/utils';
 import crypto from 'crypto';
@@ -70,7 +70,9 @@ export type ProblemCode =
   | 'outsidePackage'
   | 'unresolvedConflict'
   | 'columnsMismatch'
-  | 'systemCollection';
+  | 'systemCollection'
+  | 'expressionsNotConfirmed'
+  | 'missingPrimaryKey';
 
 /** What to do with a collection from the package that already exists in this environment. */
 export const CONFLICT_MODES = ['skipCollectionImportData', 'skipAll', 'overrideSchema', 'overrideAll'] as const;
@@ -118,6 +120,8 @@ export interface Preview {
   missingPlugins: string[];
   // Collections from the package that already exist here; each needs a ConflictMode on import.
   conflicts: PreviewConflict[];
+  // Expressions in titles/descriptions/UI schemas; the import runs only after the admin confirms they trust the file.
+  expressions: Problem[];
 }
 
 export interface ImportResult {
@@ -141,6 +145,8 @@ export interface ImportOptions {
   userId?: string | number | null;
   /** One mode per conflicting collection (see Preview.conflicts). */
   resolutions?: Record<string, ConflictMode>;
+  /** The admin confirmed they trust the file's expressions (see Preview.expressions). */
+  trustExpressions?: boolean;
 }
 
 interface CollectionRepositoryWithLoad {
@@ -371,6 +377,7 @@ export class CollectionImporter {
       interfaces: this.interfacesOf(pkg),
       missingPlugins: this.missingPlugins(pkg.manifest),
       conflicts: await this.conflicts(pkg),
+      expressions: this.expressionsOf(pkg),
     };
   }
 
@@ -384,6 +391,10 @@ export class CollectionImporter {
     // The target may have changed since the preview, so every check runs again.
     const problems = await this.check(pkg);
     const conflicts = await this.conflicts(pkg);
+    const expressions = this.expressionsOf(pkg);
+    if (expressions.length && options.trustExpressions !== true) {
+      problems.push({ code: 'expressionsNotConfirmed', detail: String(expressions.length) });
+    }
     const resolutions = options.resolutions || {};
     for (const conflict of conflicts) {
       const mode = resolutions[conflict.name];
@@ -651,6 +662,11 @@ export class CollectionImporter {
           meta?.name === name &&
           Array.isArray(meta.columns) &&
           meta.columns.every((column) => isValidName(column)) &&
+          (meta.attributes === undefined ||
+            (typeof meta.attributes === 'object' &&
+              Object.entries(meta.attributes).every(
+                ([column, attribute]) => meta.columns.includes(column) && isValidName(attribute),
+              ))) &&
           Number.isInteger(meta.count) &&
           meta.count >= 0;
         if (valid) metas[name] = meta;
@@ -660,6 +676,32 @@ export class CollectionImporter {
     }
 
     return { manifest, collections, associations, through, metas };
+  }
+
+  /**
+   * `{{ }}` expressions (other than plain translations) in titles, descriptions and UI schemas, which NocoBase's UI may
+   * evaluate. They are not refused outright: legitimate packages contain them (e.g. formula notes in a description), so
+   * the admin must confirm that they trust the file before the import runs. Other values (e.g. a formula field's
+   * `{{field}} * 2`) are evaluated by sandboxed server-side engines and are not listed.
+   */
+  private expressionsOf(pkg: LoadedPackage): Problem[] {
+    const found: Problem[] = [];
+    const scan = (collection: string, entry: Record<string, unknown> | undefined) => {
+      const expression = findUnsafeExpressionInUi(entry);
+      if (expression) {
+        const field = entry?.name !== collection ? (entry?.name as string) : undefined;
+        found.push({ code: 'unsafeExpression', collection, field, detail: expression.slice(0, 120) });
+      }
+    };
+    for (const collection of pkg.collections) {
+      scan(collection.name, collection);
+      for (const field of collection.fields || []) scan(collection.name, field);
+    }
+    for (const association of pkg.associations) {
+      scan(String(association.collectionName), association);
+      scan(String(association.target), association.reverseField);
+    }
+    return found;
   }
 
   private async check(pkg: LoadedPackage): Promise<Problem[]> {
@@ -732,23 +774,12 @@ export class CollectionImporter {
 
     this.checkContainment(pkg, problems);
 
-    // Titles, descriptions and uiSchema are compiled by NocoBase's UI, which evaluates `{{ }}` expressions; there only
-    // plain translations are allowed. Other values (e.g. a formula field's `{{field}} * 2`) are evaluated by sandboxed
-    // server-side engines and are left alone.
-    const reportUnsafe = (collection: string, entries: (Record<string, unknown> | undefined)[]) => {
-      for (const entry of entries) {
-        const unsafe = findUnsafeExpressionInUi(entry);
-        if (unsafe) {
-          problems.push({ code: 'unsafeExpression', collection, detail: unsafe.slice(0, 120) });
-          return;
-        }
-      }
-    };
+    // A collection without generated id needs its primary key among its fields (packages from 0.1.4 and earlier could
+    // leave it out when the key was also used as a foreign key).
     for (const collection of pkg.collections) {
-      reportUnsafe(collection.name, [collection, ...(collection.fields || [])]);
-    }
-    for (const association of pkg.associations) {
-      reportUnsafe(String(association.collectionName), [association, association.reverseField]);
+      if (collection.autoGenId === false && !(collection.fields || []).some((field) => field.primaryKey)) {
+        problems.push({ code: 'missingPrimaryKey', collection: collection.name });
+      }
     }
 
     for (const dependency of manifest.dependencies) {
@@ -925,33 +956,84 @@ export class CollectionImporter {
     }
   }
 
-  /** Rows are appended by column name into an existing table, so every package column must exist there. */
-  private async assertColumnsSubset(name: string, meta: DataMeta, transaction: Transaction) {
-    const collection = this.db.getCollection(name);
+  /**
+   * Maps each column of the package to a column of the target table. Column names differ when source and target use
+   * different naming (DB_UNDERSCORED), so columns are matched by field name: from the package's column → field list,
+   * or for older packages by NocoBase's own snake_case of the field names.
+   */
+  private mapColumns(name: string, meta: DataMeta) {
+    const attributes = this.db.getCollection(name).model.getAttributes();
+    const targetByKey = new Map<string, string>();
+    for (const [attributeName, attribute] of Object.entries(attributes)) {
+      const column = attribute.field || attributeName;
+      for (const key of [column, attributeName, snakeCase(attributeName)]) {
+        if (!targetByKey.has(key)) targetByKey.set(key, column);
+      }
+    }
+    const map = new Map<string, string>();
+    const unmapped: string[] = [];
+    for (const column of meta.columns) {
+      const attributeName = meta.attributes?.[column];
+      const target = (attributeName && targetByKey.get(attributeName)) || targetByKey.get(column);
+      if (target && ![...map.values()].includes(target)) map.set(column, target);
+      else unmapped.push(column);
+    }
+    const targetColumns = new Set(Object.values(attributes).map((attribute) => attribute.field));
+    return { map, unmapped, targetColumns };
+  }
+
+  private async liveColumns(name: string, transaction: Transaction) {
+    // The tables may only exist inside the uncommitted transaction. Sequelize forwards describeTable options to the
+    // query (core Collection does the same), but its typings omit `transaction`.
     const describeOptions = { transaction } as unknown as Parameters<QueryInterface['describeTable']>[1];
-    const live = await this.db.sequelize
-      .getQueryInterface()
-      .describeTable(collection.getTableNameWithSchema(), describeOptions);
-    const missing = meta.columns.filter((column) => !(column in live));
+    const collection = this.db.getCollection(name);
+    return new Set(
+      Object.keys(
+        await this.db.sequelize.getQueryInterface().describeTable(collection.getTableNameWithSchema(), describeOptions),
+      ),
+    );
+  }
+
+  /** Rows are appended into an existing table, so every package column must have a counterpart there. */
+  private async assertColumnsSubset(name: string, meta: DataMeta, transaction: Transaction) {
+    const { map, unmapped } = this.mapColumns(name, meta);
+    const live = await this.liveColumns(name, transaction);
+    const missing = [...unmapped, ...[...map.values()].filter((column) => !live.has(column))];
     if (missing.length) {
       throw new Error(`Columns missing in ${name}: ${missing.join(', ')}`);
     }
   }
 
-  /** The dumped rows are column arrays, so the tables created here must have exactly the source columns. */
+  /**
+   * The tables created here must have a counterpart for every source column, and no other columns. Junction tables
+   * only need their two key columns (older installations created them with different bookkeeping columns).
+   */
   private async assertColumns(pkg: LoadedPackage, names: string[], transaction: Transaction) {
     for (const name of names) {
-      const collection = this.db.getCollection(name);
-      // The tables only exist inside the uncommitted transaction. Sequelize forwards describeTable options to the
-      // query (core Collection does the same), but its typings omit `transaction`.
-      const describeOptions = { transaction } as unknown as Parameters<QueryInterface['describeTable']>[1];
-      const live = Object.keys(
-        await this.db.sequelize.getQueryInterface().describeTable(collection.getTableNameWithSchema(), describeOptions),
-      ).sort();
-      const expected = [...pkg.metas[name].columns].sort();
-      if (!lodash.isEqual(live, expected)) {
+      const meta = pkg.metas[name];
+      const { map, unmapped } = this.mapColumns(name, meta);
+      const live = await this.liveColumns(name, transaction);
+      const mapped = new Set(map.values());
+
+      if (pkg.through.includes(name)) {
+        const attributes = this.db.getCollection(name).model.getAttributes();
+        const keyColumns = pkg.associations
+          .filter((association) => association.type === 'belongsToMany' && association.through === name)
+          .flatMap((association) => [association.foreignKey, association.otherKey])
+          .filter((key): key is string => typeof key === 'string')
+          .map((key) => attributes[key]?.field || key);
+        const missingKeys = keyColumns.filter((column) => !mapped.has(column) || !live.has(column));
+        if (missingKeys.length) {
+          throw new Error(`Junction table ${name} lacks key columns: ${missingKeys.join(', ')}`);
+        }
+        continue;
+      }
+
+      const extra = [...live].filter((column) => !mapped.has(column));
+      if (unmapped.length || extra.length) {
         throw new Error(
-          `Columns of ${name} differ from the package: expected [${expected.join(', ')}], got [${live.join(', ')}]`,
+          `Columns of ${name} differ from the package: not in the target [${unmapped.join(', ')}], ` +
+            `only in the target [${extra.join(', ')}]`,
         );
       }
     }
@@ -981,6 +1063,9 @@ export class CollectionImporter {
     const attributeByColumn = new Map(
       Object.entries(attributes).map(([attributeName, attribute]) => [attribute.field || attributeName, attributeName]),
     );
+    // Package column → target column (names differ when source and target naming differ); unmapped columns of a
+    // junction table are left out (see assertColumns).
+    const { map: targetColumnOf } = this.mapColumns(name, meta);
     const columnAttributes = Object.fromEntries(
       Object.entries(attributes).map(([attributeName, attribute]) => [attribute.field || attributeName, attribute]),
     );
@@ -1018,7 +1103,9 @@ export class CollectionImporter {
         throw new Error(`Invalid row in ${name}`);
       }
       const record: Record<string, unknown> = {};
-      meta.columns.forEach((column, index) => {
+      meta.columns.forEach((sourceColumn, index) => {
+        const column = targetColumnOf.get(sourceColumn);
+        if (!column) return;
         const field = collection.getField(attributeByColumn.get(column));
         if (userColumns.has(column)) {
           record[column] = importingUserId;
