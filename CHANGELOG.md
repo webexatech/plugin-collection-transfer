@@ -2,6 +2,13 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.1.3
+
+- Fixed: **Export failed with 502 behind a reverse proxy** (e.g. nginx). The export summary was sent in a response
+  header that outgrew the proxy's header buffer; exporting is now two requests (prepare, then download) and no data
+  travels in headers.
+- Builds for each NocoBase line: `0.1.3-nocobase.2.1` (2.1.x), `0.1.3` (2.2.x), `0.1.3-nocobase.2.3` (2.3.x beta).
+
 ## 0.1.2 – NocoBase 2.2.x
 
 Security hardening of the import (upgrade recommended):

@@ -179,7 +179,19 @@ describe('collection exporter', () => {
       .post('/collectionTransfer:export')
       .send({ collections: ['projects'], includeData: false });
     expect(exported.status).toBe(200);
-    expect(exported.headers['content-disposition']).toMatch(/collections-.*\.zip/);
+    // No data travels in headers (large headers make reverse proxies answer 502).
+    expect(exported.headers['x-collection-transfer-manifest']).toBeUndefined();
+    const { token, fileName, manifest } = exported.body.data;
+    expect(fileName).toMatch(/^collections-.*\.zip$/);
+    expect(manifest.collections).toEqual(['projects']);
+    expect(manifest).not.toHaveProperty('plugins');
+
+    const download = await adminAgent.get('/collectionTransfer:download').query({ token });
+    expect(download.status).toBe(200);
+    expect(download.headers['content-disposition']).toMatch(/collections-.*\.zip/);
+    // A prepared file can be downloaded once.
+    expect((await adminAgent.get('/collectionTransfer:download').query({ token })).status).toBe(404);
+    expect((await adminAgent.get('/collectionTransfer:download').query({ token: '../../etc' })).status).toBe(400);
 
     const member = await db.getRepository('users').create({ values: { nickname: 'member', roles: ['member'] } });
     const memberAgent = await app.agent().login(member);

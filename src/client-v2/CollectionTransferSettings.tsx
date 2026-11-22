@@ -30,6 +30,7 @@ export interface TransferServices {
   request: (config: {
     url: string;
     method: 'get' | 'post';
+    params?: Record<string, string>;
     data?: unknown;
     responseType?: 'blob' | 'json';
   }) => Promise<{ data: any; headers?: Record<string, string> }>;
@@ -247,17 +248,21 @@ const ExportPanel: React.FC = () => {
     setError(undefined);
     setLastExport(undefined);
     try {
-      const response = await api.request({
+      // Two requests: the export returns a small JSON summary and a token, the file is then downloaded with it.
+      const { data } = await api.request({
         url: 'collectionTransfer:export',
         method: 'post',
         data: { collections: selected, includeData },
+      });
+      const exported = data?.data as { token: string; fileName: string; manifest: Manifest };
+      const file = await api.request({
+        url: 'collectionTransfer:download',
+        method: 'get',
+        params: { token: exported.token },
         responseType: 'blob',
       });
-      downloadBlob(response.data, fileNameFromDisposition(response.headers?.['content-disposition']));
-      const manifestHeader = response.headers?.['x-collection-transfer-manifest'];
-      if (manifestHeader) {
-        setLastExport(JSON.parse(decodeURIComponent(manifestHeader)) as Manifest);
-      }
+      downloadBlob(file.data, exported.fileName || fileNameFromDisposition(file.headers?.['content-disposition']));
+      setLastExport(exported.manifest);
     } catch (e) {
       setError(await readError(e));
     } finally {

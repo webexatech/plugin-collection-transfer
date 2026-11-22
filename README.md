@@ -6,21 +6,28 @@ another environment or back into the same one.
 
 ## Compatibility
 
-| Plugin version | NocoBase | Database | Admin UI |
-| --- | --- | --- | --- |
-| 0.1.x | 2.2.x (tested on 2.2.50) | PostgreSQL | classic (`/admin`) and new (`/v/admin`) |
+NocoBase checks a plugin against the versions it was **built** with, per minor release, and shows a "dependency
+version mismatch" warning otherwise. Each NocoBase minor therefore has its own build — install the one for your
+NocoBase version:
 
-NocoBase checks a plugin against the versions it was **built** with, per minor release (`2.2.x`). A build for
-2.2.x shows a "dependency version mismatch" warning on 2.3.x, so each NocoBase minor gets its own plugin build;
-install the plugin version listed for your NocoBase version. Source and target must run the same database type.
+| NocoBase | Plugin version | npm tag | Tested on |
+| --- | --- | --- | --- |
+| 2.1.x | `0.1.3-nocobase.2.1` | `nocobase-2.1` | 2.1.39 |
+| 2.2.x | `0.1.3` | `nocobase-2.2`, `latest` | 2.2.50 |
+| 2.3.x (beta) | `0.1.3-nocobase.2.3` | `nocobase-2.3` | 2.3.0-beta.26 |
+
+All builds: PostgreSQL; settings page in the classic (`/admin`) and the new (`/v/admin`) admin UI. Source and target
+must run the same database type.
 
 ## Install
 
 - **Plugin manager:** *Plugin manager → Add & update → npm registry*, package name
-  `@webexatech/plugin-collection-transfer`, registry `https://registry.npmjs.org`. Then enable it.
-- **Upload:** *Plugin manager → Add & update → Upload*, choose the `.tgz` from the GitHub release. Then enable it.
-- **CLI:** `yarn pm add @webexatech/plugin-collection-transfer --registry=https://registry.npmjs.org`, then
-  `yarn pm enable @webexatech/plugin-collection-transfer`.
+  `@webexatech/plugin-collection-transfer`, registry `https://registry.npmjs.org`, and the plugin version from the
+  table above for your NocoBase version. Then enable it.
+- **Upload:** *Plugin manager → Add & update → Upload*, choose the `.tgz` for your NocoBase version from the GitHub
+  release. Then enable it.
+- **CLI:** `yarn pm add @webexatech/plugin-collection-transfer --registry=https://registry.npmjs.org --version=<version>`,
+  then `yarn pm enable @webexatech/plugin-collection-transfer`.
 
 Updating works the same way (*Add & update*, or `yarn pm update … --registry=…`). The plugin stores no data of its
 own, so updates need no migration.
@@ -122,7 +129,8 @@ data/<collection>/data     one JSON array of column values per row (only with "I
 | Action | Request | Response |
 | --- | --- | --- |
 | `collectionTransfer:listCollections` | `GET` | collections that can be selected |
-| `collectionTransfer:export` | `POST { collections: string[], includeData: boolean }` | the `.zip` download |
+| `collectionTransfer:export` | `POST { collections: string[], includeData: boolean }` | `{ token, fileName, manifest }`; the file is prepared for download |
+| `collectionTransfer:download` | `GET ?token=…` | the `.zip`, once; prepared files expire after an hour |
 | `collectionTransfer:preview` | `POST` multipart, field `file` | `token`, `problems`, `conflicts`, `interfaces` |
 | `collectionTransfer:import` | `POST { token, resolutions: { [collection]: mode } }` | created / overridden / skipped, `rowCounts`; `409 { errors, problems }` when blocked |
 

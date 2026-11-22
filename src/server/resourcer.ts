@@ -1,8 +1,10 @@
 import { Context, Next } from '@nocobase/actions';
-import { koaMulter as multer } from '@nocobase/utils';
+import { koaMulter as multer, storagePathJoin } from '@nocobase/utils';
+import crypto from 'crypto';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
 import os from 'os';
+import path from 'path';
 import { CollectionExporter } from './exporter';
 import { CollectionImporter, CONFLICT_MODES, ConflictMode, ImportBlockedError } from './importer';
 // @ts-ignore
@@ -13,8 +15,29 @@ export const RESOURCE_NAME = 'collectionTransfer';
 const NS: string = pkg.name;
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
+const EXPORT_TOKEN = /^[0-9a-f-]{36}$/;
+const EXPORT_TTL_MS = 60 * 60 * 1000;
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function exportsDir() {
+  return storagePathJoin('tmp', 'collection-transfer-exports');
+}
+
+/** Exports that were never downloaded are removed after an hour. */
+async function removeExpiredExports() {
+  const root = exportsDir();
+  const entries = await fsPromises.readdir(root).catch((): string[] => []);
+  const now = Date.now();
+  for (const entry of entries) {
+    const entryPath = path.join(root, entry);
+    const stat = await fsPromises.stat(entryPath).catch(() => null);
+    if (stat && now - stat.mtimeMs > EXPORT_TTL_MS) {
+      await fsPromises.rm(entryPath, { recursive: true, force: true });
+    }
+  }
 }
 
 export default {
@@ -45,12 +68,43 @@ export default {
         ctx.throw(400, errorMessage(error));
       }
 
-      const stream = fs.createReadStream(result.filePath);
-      stream.on('close', () => {
-        fsPromises.rm(result.filePath, { force: true }).catch((error) => ctx.app.log.warn(error));
+      // The file is kept for a separate download request and only a small JSON summary is returned. Sending the
+      // manifest in a response header made reverse proxies (nginx: 4–8 KB header buffer) answer with 502.
+      await removeExpiredExports();
+      const token = crypto.randomUUID();
+      const dir = path.join(exportsDir(), token);
+      await fsPromises.mkdir(dir, { recursive: true });
+      await fsPromises.rename(result.filePath, path.join(dir, result.fileName)).catch(async () => {
+        await fsPromises.copyFile(result.filePath, path.join(dir, result.fileName));
+        await fsPromises.rm(result.filePath, { force: true });
       });
-      ctx.attachment(result.fileName);
-      ctx.set('X-Collection-Transfer-Manifest', encodeURIComponent(JSON.stringify(result.manifest)));
+      const { plugins, ...summary } = result.manifest;
+      ctx.body = { token, fileName: result.fileName, manifest: summary };
+      await next();
+    },
+
+    /** Streams a file prepared by `export` once, then deletes it. */
+    async download(ctx: Context, next: Next) {
+      const { token } = ctx.action.params;
+      if (typeof token !== 'string' || !EXPORT_TOKEN.test(token)) {
+        ctx.throw(400, 'Invalid download token');
+      }
+      // Claim the export by renaming its folder first, so a second request finds nothing even while this one streams.
+      const dir = path.join(exportsDir(), token);
+      const claimed = `${dir}.sending-${crypto.randomUUID()}`;
+      const owned = await fsPromises
+        .rename(dir, claimed)
+        .then(() => true)
+        .catch(() => false);
+      const [fileName] = owned ? await fsPromises.readdir(claimed).catch((): string[] => []) : [];
+      if (!fileName) {
+        ctx.throw(404, 'Export not found or already downloaded');
+      }
+      const stream = fs.createReadStream(path.join(claimed, fileName));
+      stream.on('close', () => {
+        fsPromises.rm(claimed, { recursive: true, force: true }).catch((error) => ctx.app.log.warn(error));
+      });
+      ctx.attachment(fileName);
       ctx.body = stream;
       await next();
     },
