@@ -4,7 +4,7 @@
   "displayName.zh-CN": "数据表迁移",
   "description": "Move collections between NocoBase environments: export one or more collections (schema, optionally data) to a file and import it elsewhere, with per-collection conflict handling.",
   "description.zh-CN": "在 NocoBase 环境之间迁移数据表：将一个或多个数据表（结构，可选包含数据）导出为文件并导入到其他环境，支持逐表冲突处理。",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "license": "Apache-2.0",
   "author": "Webexa Technologies LLP",
   "homepage": "https://github.com/webexatech/plugin-collection-transfer#readme",

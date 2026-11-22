@@ -17,7 +17,7 @@ import {
   CollectionPayload,
   dataDir,
   DataMeta,
-  findUnsafeExpression,
+  findUnsafeExpressionInUi,
   FORMAT_VERSION,
   isValidName,
   Manifest,
@@ -48,6 +48,7 @@ const NESTED_FIELD_STRIP = ['key', 'sort', 'collectionName', 'parentKey', 'rever
 const ASSOCIATION_STRIP = ['key', 'sort', 'parentKey', 'reverseKey', 'children'];
 const UPLOAD_TTL_MS = 60 * 60 * 1000;
 const INSERT_CHUNK_SIZE = 500;
+const SUPPORTED_DIALECTS = ['postgres', 'mysql', 'mariadb'];
 const ASSOCIATION_TYPES_FOR_REFERENCES = ['belongsTo', 'hasOne', 'hasMany', 'belongsToMany'];
 
 // Only these entries are extracted from an uploaded package; anything else is ignored.
@@ -669,9 +670,13 @@ export class CollectionImporter {
       problems.push({ code: 'formatVersion', detail: String(manifest.formatVersion) });
       return problems;
     }
-    const dialect = this.db.sequelize.getDialect();
-    if (manifest.dialect !== dialect) {
-      problems.push({ code: 'dialect', detail: `${manifest.dialect} → ${dialect}` });
+    // Packages move between database types (PostgreSQL, MySQL/MariaDB): tables are created by NocoBase for the target
+    // database and values are converted per field type on insert. Only these dialects are supported.
+    if (
+      !SUPPORTED_DIALECTS.includes(manifest.dialect) ||
+      !SUPPORTED_DIALECTS.includes(this.db.sequelize.getDialect())
+    ) {
+      problems.push({ code: 'dialect', detail: `${manifest.dialect} → ${this.db.sequelize.getDialect()}` });
     }
 
     const names = [...manifest.collections, ...manifest.through];
@@ -727,13 +732,23 @@ export class CollectionImporter {
 
     this.checkContainment(pkg, problems);
 
-    // Titles and uiSchema strings are compiled by NocoBase's UI later; only plain translations are allowed.
-    for (const payload of [...pkg.collections, ...pkg.associations]) {
-      const unsafe = findUnsafeExpression(payload);
-      if (unsafe) {
-        const collection = 'collectionName' in payload ? (payload.collectionName as string) : payload.name;
-        problems.push({ code: 'unsafeExpression', collection, detail: unsafe.slice(0, 120) });
+    // Titles, descriptions and uiSchema are compiled by NocoBase's UI, which evaluates `{{ }}` expressions; there only
+    // plain translations are allowed. Other values (e.g. a formula field's `{{field}} * 2`) are evaluated by sandboxed
+    // server-side engines and are left alone.
+    const reportUnsafe = (collection: string, entries: (Record<string, unknown> | undefined)[]) => {
+      for (const entry of entries) {
+        const unsafe = findUnsafeExpressionInUi(entry);
+        if (unsafe) {
+          problems.push({ code: 'unsafeExpression', collection, detail: unsafe.slice(0, 120) });
+          return;
+        }
       }
+    };
+    for (const collection of pkg.collections) {
+      reportUnsafe(collection.name, [collection, ...(collection.fields || [])]);
+    }
+    for (const association of pkg.associations) {
+      reportUnsafe(String(association.collectionName), [association, association.reverseField]);
     }
 
     for (const dependency of manifest.dependencies) {

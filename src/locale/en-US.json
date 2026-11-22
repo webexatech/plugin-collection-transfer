@@ -66,5 +66,9 @@
   "What to do with \"{{name}}\"": "What to do with \"{{name}}\"",
   "Yes": "Yes",
   "{{name}}: {{count}} row(s)": "{{name}}: {{count}} row(s)",
-  "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import": "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import"
+  "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import": "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import",
+  "The selected collections have relations to collections that are not selected: {{names}}": "The selected collections have relations to collections that are not selected: {{names}}",
+  "The import refuses relations to collections that are neither in the file nor in the target.": "The import refuses relations to collections that are neither in the file nor in the target.",
+  "These cannot be transferred and must already exist in the target: {{names}}": "These cannot be transferred and must already exist in the target: {{names}}",
+  "Add related collections": "Add related collections"
 }

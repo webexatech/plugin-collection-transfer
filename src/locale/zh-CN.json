@@ -66,5 +66,9 @@
   "What to do with \"{{name}}\"": "如何处理“{{name}}”",
   "Yes": "是",
   "{{name}}: {{count}} row(s)": "{{name}}：{{count}} 行",
-  "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import": "“{{collection}}”在当前环境中是系统或插件数据表，不能通过导入替换"
+  "\"{{collection}}\" is a system or plugin collection here and cannot be replaced by an import": "“{{collection}}”在当前环境中是系统或插件数据表，不能通过导入替换",
+  "The selected collections have relations to collections that are not selected: {{names}}": "所选数据表与未选择的数据表存在关系：{{names}}",
+  "The import refuses relations to collections that are neither in the file nor in the target.": "导入时，指向既不在文件中也不在目标环境中的数据表的关系会被拒绝。",
+  "These cannot be transferred and must already exist in the target: {{names}}": "以下数据表无法迁移，必须已存在于目标环境中：{{names}}",
+  "Add related collections": "添加相关数据表"
 }

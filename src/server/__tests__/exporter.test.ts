@@ -37,6 +37,9 @@ describe('collection exporter', () => {
     const list = await exporter.listCollections();
     const names = list.map((item) => item.name).sort();
     expect(names).toEqual(['projects', 'tags', 'tasks']);
+    // Relation targets among user collections (users is a system collection, so not listed).
+    const related = Object.fromEntries(list.map((item) => [item.name, item.related]));
+    expect(related).toEqual({ projects: ['tasks'], tasks: ['projects', 'tags'], tags: ['tasks'] });
     expect(list.every((item) => item.supported)).toBe(true);
   });
 

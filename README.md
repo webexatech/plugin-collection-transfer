@@ -12,25 +12,31 @@ NocoBase version:
 
 | NocoBase | Plugin version | npm tag | Tested on |
 | --- | --- | --- | --- |
-| 2.1.x | `0.1.3-nocobase.2.1` | `nocobase-2.1` | 2.1.39 |
-| 2.2.x | `0.1.3` | `nocobase-2.2`, `latest` | 2.2.50 |
-| 2.3.x (beta) | `0.1.3-nocobase.2.3` | `nocobase-2.3` | 2.3.0-beta.26 |
+| 2.1.x | `0.1.4-nocobase.2.1` | `nocobase-2.1` | 2.1.39 |
+| 2.2.x | `0.1.4` | `nocobase-2.2`, `latest` | 2.2.50 |
+| 2.3.x (beta) | `0.1.4-nocobase.2.3` | `nocobase-2.3` | 2.3.0-beta.26 |
 
-All builds: PostgreSQL; settings page in the classic (`/admin`) and the new (`/v/admin`) admin UI. Source and target
-must run the same database type.
+All builds: PostgreSQL and MySQL/MariaDB, including transfers between them (e.g. MySQL → PostgreSQL; tested with
+PostgreSQL 16 and MySQL 8); settings page in the classic (`/admin`) and the new (`/v/admin`) admin UI.
 
 ## Install
 
-- **Plugin manager:** *Plugin manager → Add & update → npm registry*, package name
-  `@webexatech/plugin-collection-transfer`, registry `https://registry.npmjs.org`, and the plugin version from the
-  table above for your NocoBase version. Then enable it.
+Use the build for your NocoBase version (table above). Then enable **Collection transfer** in the plugin manager.
+
+- **URL (any NocoBase version):** *Plugin manager → Add & update → URL*, paste the npm file for your version:
+  `https://registry.npmjs.org/@webexatech/plugin-collection-transfer/-/plugin-collection-transfer-<plugin version>.tgz`
+  (e.g. `…/plugin-collection-transfer-0.1.4-nocobase.2.1.tgz`).
 - **Upload:** *Plugin manager → Add & update → Upload*, choose the `.tgz` for your NocoBase version from the GitHub
-  release. Then enable it.
-- **CLI:** `yarn pm add @webexatech/plugin-collection-transfer --registry=https://registry.npmjs.org --version=<version>`,
+  release.
+- **npm registry (NocoBase 2.2.x only):** *Plugin manager → Add & update → npm registry*, package
+  `@webexatech/plugin-collection-transfer`, registry `https://registry.npmjs.org`. The form has no version field for
+  new installs and always takes `latest` (the 2.2 build).
+- **CLI:** `yarn pm add @webexatech/plugin-collection-transfer --registry=https://registry.npmjs.org --version=<plugin version>`,
   then `yarn pm enable @webexatech/plugin-collection-transfer`.
 
-Updating works the same way (*Add & update*, or `yarn pm update … --registry=…`). The plugin stores no data of its
-own, so updates need no migration.
+**Updating:** install the newer build the same way. *Add & update* replaces the files but does not restart the app —
+restart NocoBase afterwards (Docker: restart the container; otherwise `yarn nocobase upgrade --skip-code-update` and
+restart) and reload the browser. The plugin stores no data of its own, so updates need no migration.
 
 ## Usage
 
@@ -39,8 +45,11 @@ Open **Settings → Collection transfer** (admins only; ACL snippet `pm.collecti
 **Export tab**
 
 1. Select the collections. Collection types that cannot be transferred are shown but disabled.
-2. Turn on **Include data** to carry the rows as well.
-3. Click **Export**. The result lists the join tables that were added automatically and the collections that must
+2. If the selected collections have relations to collections you did not select, a warning lists them; click
+   **Add related collections** to include them (repeats until nothing is missing). System collections such as `users`
+   are never exported and must exist in the target.
+3. Turn on **Include data** to carry the rows as well.
+4. Click **Export**. The result lists the join tables that were added automatically and the collections that must
    already exist in the target (for example `users`, the target of *Created by*).
 
 **Import tab**
@@ -74,9 +83,10 @@ The import is blocked when:
 - a field kind is not available in the target UI (e.g. the *Code* field without `plugin-field-code`); the plugins
   enabled in the source but not in the target are listed as a hint
 - a database table with the same name exists without a collection, or a collection uses an unsupported template
-- the file comes from a different database type or format version, or a name is too long for the database
+- the file has an unsupported format version, or a name is too long for the database
 - the file tries to change anything outside its own collections (other tables, fields on other collections)
-- a title or UI schema contains a `{{ }}` expression other than a plain `{{t("…")}}` translation
+- a title, description or UI schema contains a `{{ }}` expression other than a plain `{{t("…")}}` translation (values
+  such as formula expressions are not affected)
 - the file is not a valid package
 
 The same checks run again when you click **Import**, in case the target changed after the preview.
@@ -96,7 +106,7 @@ FDW and expression collections are listed but cannot be selected.
 
 ## Known limitations
 
-- Only the main data source; source and target must use the same database type (PostgreSQL tested).
+- Only the main data source. Supported databases: PostgreSQL and MySQL/MariaDB (SQLite is not supported).
 - Primary-key conflicts are resolved per collection (skip or override), not per row; rows are not merged.
 - Sequence counters, encrypted fields, sort scopes, custom primary keys and indexes defined in collection options are
   not specially handled. A key column created by hand before its relation comes back with default display settings.
@@ -143,6 +153,8 @@ The plugin lives at `packages/plugins/@webexatech/plugin-collection-transfer` in
 
 ```bash
 yarn test packages/plugins/@webexatech/plugin-collection-transfer   # server tests (separate DB via .env.test)
+# cross-database tests also run when a MySQL test server is configured:
+# CT_MYSQL_HOST=localhost CT_MYSQL_PORT=3307 CT_MYSQL_DATABASE=ct_test CT_MYSQL_USER=nocobase CT_MYSQL_PASSWORD=nocobase yarn test …
 yarn eslint --fix packages/plugins/@webexatech/plugin-collection-transfer/src
 bash scripts/check-plugin-peer-deps.sh packages/plugins/@webexa
 yarn build @webexatech/plugin-collection-transfer --tar               # storage/tar/@webexatech/…tgz

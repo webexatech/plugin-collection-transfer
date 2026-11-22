@@ -84,6 +84,19 @@ export interface Manifest {
 const EXPRESSION = /\{\{[\s\S]*?\}\}/g;
 const SAFE_EXPRESSION = /^\{\{\s*t\(\s*(["'])[^"'{}]*\1\s*(,\s*\{\s*ns\s*:\s*(["'])[^"'{}]*\3\s*\})?\s*\)\s*\}\}$/;
 
+// The parts of a collection / field / relation definition that NocoBase's UI compiles.
+const UI_COMPILED_KEYS = ['title', 'description', 'uiSchema'];
+
+/** Returns the first unsafe expression in the UI-compiled parts of one definition (not its nested fields). */
+export function findUnsafeExpressionInUi(entry: Record<string, unknown> | undefined): string | undefined {
+  if (!entry) return undefined;
+  for (const key of UI_COMPILED_KEYS) {
+    const found = findUnsafeExpression(entry[key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 /** Returns the first unsafe expression found anywhere in a JSON value, or undefined. */
 export function findUnsafeExpression(value: unknown): string | undefined {
   if (typeof value === 'string') {

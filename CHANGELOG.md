@@ -2,6 +2,15 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.1.4
+
+- **Transfers between database types**: a package exported from MySQL/MariaDB can be imported into PostgreSQL and the
+  other way round (tested with MySQL 8 and PostgreSQL 16, including booleans, decimals, JSON, dates and relations).
+- **Related collections**: the Export tab lists collections that the selection has relations to but that are not
+  selected, and adds them with one click.
+- Fixed: the import refused legitimate packages containing formula fields (e.g. `{{gross_weight}} * 2`). The
+  expression check now only covers titles, descriptions and UI schemas, the parts NocoBase's UI evaluates.
+
 ## 0.1.3
 
 - Fixed: **Export failed with 502 behind a reverse proxy** (e.g. nginx). The export summary was sent in a response

@@ -52,6 +52,24 @@ interface TransferableCollection {
   template: string;
   supported: boolean;
   unsupportedReason?: string;
+  related: string[];
+}
+
+/** Collections reachable through relations from the selection (transitively) that are not selected yet. */
+function missingRelated(collections: TransferableCollection[], selected: React.Key[]) {
+  const byName = new Map(collections.map((collection) => [collection.name, collection]));
+  const chosen = new Set(selected.map(String));
+  const missing = new Set<string>();
+  const queue = [...chosen];
+  while (queue.length) {
+    const current = byName.get(queue.shift());
+    for (const name of current?.related || []) {
+      if (chosen.has(name) || missing.has(name)) continue;
+      missing.add(name);
+      queue.push(name);
+    }
+  }
+  return [...missing].map((name) => byName.get(name)).filter(Boolean);
 }
 
 interface Manifest {
@@ -288,6 +306,9 @@ const ExportPanel: React.FC = () => {
   ];
 
   const companions = lastExport ? lastExport.collections.filter((name) => !lastExport.selected.includes(name)) : [];
+  const related = missingRelated(collections, selected);
+  const addable = related.filter((collection) => collection.supported);
+  const notAddable = related.filter((collection) => !collection.supported);
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -309,6 +330,39 @@ const ExportPanel: React.FC = () => {
         }}
         locale={{ emptyText: t('No collections to export') }}
       />
+      {related.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('The selected collections have relations to collections that are not selected: {{names}}', {
+            names: related.map((collection) => `${displayTitle(collection.title)} (${collection.name})`).join(', '),
+          })}
+          description={
+            <Space direction="vertical" size={4}>
+              <span>
+                {t('The import refuses relations to collections that are neither in the file nor in the target.')}
+              </span>
+              {notAddable.length > 0 && (
+                <span>
+                  {t('These cannot be transferred and must already exist in the target: {{names}}', {
+                    names: notAddable.map((collection) => collection.name).join(', '),
+                  })}
+                </span>
+              )}
+            </Space>
+          }
+          action={
+            addable.length > 0 ? (
+              <Button
+                size="small"
+                onClick={() => setSelected((prev) => [...prev, ...addable.map((collection) => collection.name)])}
+              >
+                {t('Add related collections')}
+              </Button>
+            ) : undefined
+          }
+        />
+      )}
       <Space align="center" wrap>
         <Switch id={switchId} checked={includeData} onChange={setIncludeData} />
         <label htmlFor={switchId}>{t('Include data')}</label>

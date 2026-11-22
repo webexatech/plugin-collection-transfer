@@ -40,6 +40,8 @@ export interface TransferableCollection {
   template: string;
   supported: boolean;
   unsupportedReason?: string;
+  /** Other user collections this one's relation fields point to (system collections are dependencies instead). */
+  related: string[];
 }
 
 export interface ExportOptions {
@@ -92,15 +94,30 @@ export class CollectionExporter {
 
   /** Collections a user may pick for export, with a flag for the ones the PoC cannot transfer. */
   async listCollections(): Promise<TransferableCollection[]> {
-    const rows = await this.collectionRows();
-    return rows.filter(isUserCollection).map((row) => {
+    const rows = (await this.collectionRows()).filter(isUserCollection);
+    const userNames = new Set(rows.map((row) => row.name as string));
+
+    // Relation targets per collection, limited to user collections (the UI offers to add them to the export).
+    const related = new Map<string, Set<string>>();
+    for (const field of await this.fieldRowsOf([...userNames])) {
+      if (!ASSOCIATION_TYPES.includes(field.type as string)) continue;
+      const owner = field.collectionName as string;
+      const target = field.target as string;
+      if (target === owner || !userNames.has(target)) continue;
+      if (!related.has(owner)) related.set(owner, new Set());
+      related.get(owner).add(target);
+    }
+
+    return rows.map((row) => {
+      const name = row.name as string;
       const reason = unsupportedReason(row);
       return {
-        name: row.name as string,
-        title: (row.title as string) || (row.name as string),
+        name,
+        title: (row.title as string) || name,
         template: (row.template as string) || 'general',
         supported: !reason,
         unsupportedReason: reason,
+        related: [...(related.get(name) || [])].sort(),
       };
     });
   }
