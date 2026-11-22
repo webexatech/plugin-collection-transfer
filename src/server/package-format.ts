@@ -203,6 +203,11 @@ export function sqlProblem(sql: unknown): string | undefined {
   const lower = statement.toLowerCase();
   const forbidden = SQL_FORBIDDEN.find((keyword) => lower.includes(keyword));
   if (forbidden) return `uses "${forbidden}"`;
+  // Functions that run SQL given as a string, or reach outside the database.
+  const call = lower.match(
+    /\b(query_to_xml|table_to_xml|cursor_to_xml|database_to_xml|schema_to_xml|dblink\w*|lo_\w+|xpath|sys_exec|sys_eval)\s*\(/,
+  );
+  if (call) return `uses "${call[1]}"`;
   // Writes hidden in a WITH clause (PostgreSQL data-modifying CTEs) or SELECT … INTO (creates a table).
   const writing = lower.match(
     /\b(insert|update|delete|merge|drop|alter|create|truncate|grant|revoke|copy|call|execute|into|lock)\b/,

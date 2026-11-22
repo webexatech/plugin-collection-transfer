@@ -1013,10 +1013,18 @@ export class CollectionImporter {
       if ((type === 'hasMany' || type === 'hasOne') && !own.has(target)) {
         const targetCollection = dependencies.has(target) ? this.db.getCollection(target) : undefined;
         const key = association.foreignKey;
+        const attributes = targetCollection ? targetCollection.model.getAttributes() : {};
+        // An existing column counts whether it is named by its field or by its column (e.g. snake_case naming).
+        const takesColumn =
+          isValidName(key) &&
+          Object.entries(attributes).some(
+            ([attributeName, attribute]) =>
+              attributeName === key || attribute.field === key || attribute.field === snakeCase(key),
+          );
         const keyIsSafe =
           !!targetCollection &&
           isValidName(key) &&
-          (!targetCollection.model.getAttributes()[key] || targetCollection.model.primaryKeyAttribute === key);
+          (!takesColumn || targetCollection.model.primaryKeyAttribute === key);
         if (!keyIsSafe) outside(collectionName, `would add a key column to "${target}"`, name);
       }
       if (reverseField && !own.has(target)) {
@@ -1062,7 +1070,13 @@ export class CollectionImporter {
       if (template === 'view') {
         const viewName = collection.viewName ?? name;
         const schema = collection.schema ?? undefined;
-        if (!isValidName(viewName) || (schema !== undefined && !isValidName(schema))) {
+        // Only views of the app's own schema, never system catalogs.
+        const ownSchema = (this.db.options as { schema?: string }).schema || 'public';
+        const systemView =
+          typeof viewName === 'string' &&
+          (/^pg_/i.test(viewName) || /^(information_schema|pg_catalog)$/i.test(viewName));
+        const foreignSchema = schema !== undefined && (!this.db.inDialect('postgres') || schema !== ownSchema);
+        if (!isValidName(viewName) || (schema !== undefined && !isValidName(schema)) || systemView || foreignSchema) {
           problems.push({ code: 'invalidName', collection: name, detail: String(viewName) });
         } else if (!(await this.viewExists(viewName, schema as string | undefined))) {
           problems.push({ code: 'missingView', collection: name, detail: viewName });

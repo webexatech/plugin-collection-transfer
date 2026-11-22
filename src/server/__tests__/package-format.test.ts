@@ -68,3 +68,12 @@ describe('sqlProblem', () => {
     expect(sqlProblem('SELECT * FROM information_schema.tables')).toBe('uses "information_schema"');
   });
 });
+
+describe('sqlProblem: dynamic SQL', () => {
+  it('refuses functions that run SQL from a string or leave the database', () => {
+    expect(sqlProblem("SELECT query_to_xml('delete from users', true, true, '')")).toBe('uses "query_to_xml"');
+    expect(sqlProblem("SELECT * FROM dblink('host=x', 'select 1') AS t(a int)")).toBe('uses "dblink"');
+    expect(sqlProblem('SELECT lo_import(1)')).toBe('uses "lo_import"');
+    expect(sqlProblem('SELECT hello_world FROM t')).toBeUndefined();
+  });
+});
