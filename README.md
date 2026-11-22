@@ -55,7 +55,15 @@ Open **Settings → Collection transfer** (admins only; ACL snippet `pm.collecti
 **Import tab**
 
 1. Drop the `.zip`. Nothing is written yet.
-2. The preview shows what will be created (fields and rows per collection) and every blocking problem.
+2. The preview shows what will be created (fields and rows per collection) and every blocking problem. For each
+   collection you can:
+   - change its **display name** and its **collection name** (the identifier and table name), e.g. to import a copy next
+     to an existing collection. Relations, reverse fields and parents inside the file follow the new name; many-to-many
+     junction tables of a renamed collection get new generated names. Click **Check names** to run the checks again;
+     *Import* waits until you do. SQL queries are text and are not changed (the preview says which ones read a renamed
+     collection), and collections outside the file (e.g. `users`) cannot be renamed.
+   - choose its **categories**. Categories with the same name as in the source are pre-selected; the choice is optional.
+     Files exported before 0.2.0 carry no category names, so nothing is pre-selected.
 3. For each collection that **already exists** in the target, choose:
 
    | Option | Fields | Existing rows | Rows from the file |
@@ -163,7 +171,8 @@ data/<collection>/data     one JSON array of column values per row (only with "I
 | `collectionTransfer:export` | `POST { collections: string[], includeData: boolean }` | `{ token, fileName, manifest }`; the file is prepared for download |
 | `collectionTransfer:download` | `GET ?token=…` | the `.zip`, once; prepared files expire after an hour |
 | `collectionTransfer:preview` | `POST` multipart, field `file` | `token`, `problems`, `conflicts`, `interfaces` |
-| `collectionTransfer:import` | `POST { token, resolutions: { [collection]: mode } }` | created / overridden / skipped, `rowCounts`; `409 { errors, problems }` when blocked |
+| `collectionTransfer:check` | `POST { token, renames: { [name in file]: { name?, title? } } }` | the preview again, with the new names |
+| `collectionTransfer:import` | `POST { token, resolutions: { [collection]: mode }, renames?, categories?: { [name in file]: categoryId[] } }` | created / overridden / skipped, `rowCounts`; `409 { errors, problems }` when blocked |
 
 Modes: `skipCollectionImportData`, `skipAll`, `overrideSchema`, `overrideAll`. Uploads are kept in
 `<storage>/tmp/collection-transfer/` for one hour, and after a failed import so it can be retried with the same token.

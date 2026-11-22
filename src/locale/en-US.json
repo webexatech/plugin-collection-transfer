@@ -87,5 +87,18 @@
   "File collection \"{{collection}}\": the file records are imported, the files themselves are not. They must be reachable in a storage of the same name here.": "File collection \"{{collection}}\": the file records are imported, the files themselves are not. They must be reachable in a storage of the same name here.",
   "\"{{collection}}\" ({{detail}}) has no data of its own; it shows the data of this environment": "\"{{collection}}\" ({{detail}}) has no data of its own; it shows the data of this environment",
   "Not part of the import": "Not part of the import",
-  "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments": "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments"
+  "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments": "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments",
+  "The new name for \"{{collection}}\" cannot be used ({{detail}})": "The new name for \"{{collection}}\" cannot be used ({{detail}})",
+  "The categories chosen for \"{{collection}}\" do not exist here": "The categories chosen for \"{{collection}}\" do not exist here",
+  "The SQL of \"{{collection}}\" still reads \"{{detail}}\"; edit the query after importing if it should read the renamed collection": "The SQL of \"{{collection}}\" still reads \"{{detail}}\"; edit the query after importing if it should read the renamed collection",
+  "Display name": "Display name",
+  "Collection name": "Collection name",
+  "Categories": "Categories",
+  "Display name of \"{{name}}\"": "Display name of \"{{name}}\"",
+  "Collection name of \"{{name}}\"": "Collection name of \"{{name}}\"",
+  "Categories of \"{{name}}\"": "Categories of \"{{name}}\"",
+  "In the file: {{name}}": "In the file: {{name}}",
+  "No category": "No category",
+  "Names changed. Check them before importing.": "Names changed. Check them before importing.",
+  "Check names": "Check names"
 }

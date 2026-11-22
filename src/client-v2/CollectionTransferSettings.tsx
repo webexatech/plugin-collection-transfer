@@ -7,6 +7,8 @@ import {
   Card,
   Checkbox,
   Descriptions,
+  Input,
+  Select,
   Space,
   Switch,
   Table,
@@ -93,11 +95,22 @@ interface Problem {
 
 interface PreviewCollection {
   name: string;
+  /** Name in the file (absent from servers before 0.2.0); renames and categories are keyed by it. */
+  originalName?: string;
   title: string;
   fieldCount: number;
   rowCount: number;
   isThrough: boolean;
+  categories?: string[];
 }
+
+interface PreviewCategory {
+  id: string | number;
+  name: string;
+  color?: string;
+}
+
+type Renames = Record<string, { name?: string; title?: string }>;
 
 interface PreviewInterface {
   interface: string;
@@ -123,6 +136,8 @@ interface Preview {
   expressions: Problem[];
   /** Not blocking: what the import does not carry (absent in plugin versions before 0.1.5). */
   notices?: Problem[];
+  /** Collection categories of the target (absent in plugin versions before 0.2.0). */
+  categories?: PreviewCategory[];
 }
 
 interface ImportResult {
@@ -193,6 +208,15 @@ function problemMessage(t: Translate, problem: Problem) {
     case 'relationRowsNotCarried':
       return t(
         '"{{collection}}.{{field}}": links to {{detail}} are not imported, because those records differ between environments',
+        values,
+      );
+    case 'invalidRename':
+      return t('The new name for "{{collection}}" cannot be used ({{detail}})', values);
+    case 'invalidCategory':
+      return t('The categories chosen for "{{collection}}" do not exist here', values);
+    case 'sqlNotRenamed':
+      return t(
+        'The SQL of "{{collection}}" still reads "{{detail}}"; edit the query after importing if it should read the renamed collection',
         values,
       );
     case 'dataNotCarried':
@@ -451,6 +475,24 @@ const ImportPanel: React.FC = () => {
   const [trusted, setTrusted] = useState(false);
   const [result, setResult] = useState<ImportResult>();
   const [error, setError] = useState<string>();
+  // Edited names / display names, keyed by the name in the file; `checkedRenames` are the ones the preview reflects.
+  const [edits, setEdits] = useState<Renames>({});
+  const [checkedRenames, setCheckedRenames] = useState<Renames>({});
+  const [checking, setChecking] = useState(false);
+  const [categoryChoice, setCategoryChoice] = useState<Record<string, (string | number)[]>>({});
+
+  const originalOf = (record: PreviewCollection) => record.originalName || record.name;
+  const renames: Renames = Object.fromEntries(
+    Object.entries(edits)
+      .map(([original, edit]) => {
+        const next: { name?: string; title?: string } = {};
+        if (edit.name !== undefined && edit.name.trim() && edit.name.trim() !== original) next.name = edit.name.trim();
+        if (edit.title !== undefined && edit.title.trim()) next.title = edit.title.trim();
+        return [original, next] as const;
+      })
+      .filter(([, next]) => next.name || next.title),
+  );
+  const namesPending = JSON.stringify(renames) !== JSON.stringify(checkedRenames);
 
   // Field interfaces live in the browser (some plugins register none on the server), so this check runs here.
   const unknownInterfaces: Problem[] = (preview?.interfaces || [])
@@ -482,6 +524,9 @@ const ImportPanel: React.FC = () => {
 
   const reset = () => {
     setPreview(undefined);
+    setEdits({});
+    setCheckedRenames({});
+    setCategoryChoice({});
     setResolutions({});
     setTrusted(false);
     setResult(undefined);
@@ -496,6 +541,44 @@ const ImportPanel: React.FC = () => {
     }
     setResolutions(defaults);
     setTrusted(false);
+    // Categories with the same name here are pre-selected.
+    const choice: Record<string, (string | number)[]> = {};
+    for (const collection of next.collections) {
+      if (collection.isThrough) continue;
+      choice[originalOf(collection)] = (next.categories || [])
+        .filter((category) => (collection.categories || []).includes(category.name))
+        .map((category) => category.id);
+    }
+    setCategoryChoice(choice);
+  };
+
+  /** Runs the checks again with the edited names; conflict choices and categories are kept where they still apply. */
+  const checkNames = async () => {
+    if (!preview || checking) return;
+    const sent = renames;
+    setChecking(true);
+    setError(undefined);
+    try {
+      const { data } = await api.request({
+        url: 'collectionTransfer:check',
+        method: 'post',
+        data: { token: preview.token, renames: sent },
+      });
+      const next = data?.data as Preview;
+      setPreview(next);
+      setResolutions((prev) => {
+        const kept: Record<string, ConflictMode> = {};
+        for (const conflict of next.conflicts || []) {
+          kept[conflict.name] = prev[conflict.name] || (next.manifest.includeData ? 'overrideAll' : 'overrideSchema');
+        }
+        return kept;
+      });
+      setCheckedRenames(sent);
+    } catch (e) {
+      setError(await readError(e));
+    } finally {
+      setChecking(false);
+    }
   };
 
   const uploadPackage: UploadProps['customRequest'] = async ({ file, onSuccess, onError }) => {
@@ -524,7 +607,13 @@ const ImportPanel: React.FC = () => {
       const { data } = await api.request({
         url: 'collectionTransfer:import',
         method: 'post',
-        data: { token: preview.token, resolutions, trustExpressions: trusted },
+        data: {
+          token: preview.token,
+          resolutions,
+          trustExpressions: trusted,
+          renames: checkedRenames,
+          categories: preview.categories ? categoryChoice : undefined,
+        },
       });
       setResult(data?.data as ImportResult);
       setPreview(undefined);
@@ -547,20 +636,98 @@ const ImportPanel: React.FC = () => {
     runImport();
   };
 
+  const renamable = !!preview?.collections.some((collection) => collection.originalName);
+  const skippedHere = (record: PreviewCollection) =>
+    ['skipAll', 'skipCollectionImportData'].includes(resolutions[record.name]);
+  const editName = (original: string, key: 'name' | 'title', value: string) =>
+    setEdits((prev) => ({ ...prev, [original]: { ...prev[original], [key]: value } }));
+
   const previewColumns: ColumnsType<PreviewCollection> = [
     {
-      title: t('Collection'),
+      title: renamable ? t('Display name') : t('Collection'),
       dataIndex: 'title',
-      render: (value: string, record) => (
-        <Space size={4}>
-          <span>{packageText(value)}</span>
-          <Typography.Text type="secondary" code>
-            {record.name}
-          </Typography.Text>
-          {record.isThrough && <Tag>{t('Junction table')}</Tag>}
-        </Space>
-      ),
+      render: (value: string, record) => {
+        if (!renamable || record.isThrough) {
+          return (
+            <Space size={4}>
+              <span>{packageText(value)}</span>
+              <Typography.Text type="secondary" code>
+                {record.name}
+              </Typography.Text>
+              {record.isThrough && <Tag>{t('Junction table')}</Tag>}
+            </Space>
+          );
+        }
+        const original = originalOf(record);
+        return (
+          <Input
+            size="small"
+            aria-label={t('Display name of "{{name}}"', { name: original })}
+            value={edits[original]?.title ?? packageText(value)}
+            onChange={(event) => editName(original, 'title', event.target.value)}
+          />
+        );
+      },
     },
+    ...(renamable
+      ? [
+          {
+            title: t('Collection name'),
+            dataIndex: 'name',
+            render: (value: string, record: PreviewCollection) => {
+              if (record.isThrough) return '–';
+              const original = originalOf(record);
+              return (
+                <Space direction="vertical" size={0}>
+                  <Input
+                    size="small"
+                    aria-label={t('Collection name of "{{name}}"', { name: original })}
+                    value={edits[original]?.name ?? value}
+                    onChange={(event) => editName(original, 'name', event.target.value)}
+                    onPressEnter={checkNames}
+                  />
+                  {value !== original && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {t('In the file: {{name}}', { name: original })}
+                    </Typography.Text>
+                  )}
+                </Space>
+              );
+            },
+          },
+        ]
+      : []),
+    ...(preview?.categories
+      ? [
+          {
+            title: t('Categories'),
+            key: 'categories',
+            width: 200,
+            render: (_: unknown, record: PreviewCollection) => {
+              if (record.isThrough) return '–';
+              const original = originalOf(record);
+              const fromFile = (record.categories || []).join(', ');
+              return (
+                <Select
+                  size="small"
+                  mode="multiple"
+                  allowClear
+                  style={{ width: '100%' }}
+                  aria-label={t('Categories of "{{name}}"', { name: original })}
+                  placeholder={fromFile ? t('In the file: {{name}}', { name: fromFile }) : t('No category')}
+                  disabled={skippedHere(record)}
+                  value={categoryChoice[original] || []}
+                  onChange={(ids: (string | number)[]) => setCategoryChoice((prev) => ({ ...prev, [original]: ids }))}
+                  options={(preview?.categories || []).map((category) => ({
+                    value: category.id,
+                    label: packageText(category.name),
+                  }))}
+                />
+              );
+            },
+          },
+        ]
+      : []),
     { title: t('Fields'), dataIndex: 'fieldCount', width: 100, render: (v: number, r) => (r.isThrough ? '–' : v) },
     {
       title: t('Rows'),
@@ -663,12 +830,25 @@ const ImportPanel: React.FC = () => {
             </Descriptions>
 
             <Table
-              rowKey="name"
+              rowKey={(record) => originalOf(record)}
               size="small"
               columns={previewColumns}
               dataSource={preview.collections}
               pagination={false}
+              scroll={{ x: true }}
             />
+            {namesPending && (
+              <Alert
+                type="warning"
+                showIcon
+                message={t('Names changed. Check them before importing.')}
+                action={
+                  <Button size="small" type="primary" onClick={checkNames} loading={checking}>
+                    {t('Check names')}
+                  </Button>
+                }
+              />
+            )}
 
             {notices.length > 0 && (
               <Alert
@@ -762,7 +942,7 @@ const ImportPanel: React.FC = () => {
                 type="primary"
                 onClick={handleImport}
                 loading={importing}
-                disabled={problems.length > 0 || (expressions.length > 0 && !trusted)}
+                disabled={problems.length > 0 || (expressions.length > 0 && !trusted) || namesPending || checking}
               >
                 {t('Import')}
               </Button>

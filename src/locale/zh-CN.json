@@ -87,5 +87,18 @@
   "File collection \"{{collection}}\": the file records are imported, the files themselves are not. They must be reachable in a storage of the same name here.": "文件数据表“{{collection}}”：导入文件记录，但不导入文件本身。文件必须能在此环境中同名的存储中访问。",
   "\"{{collection}}\" ({{detail}}) has no data of its own; it shows the data of this environment": "“{{collection}}”（{{detail}}）没有自己的数据，它显示此环境中的数据",
   "Not part of the import": "不在导入范围内",
-  "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments": "“{{collection}}.{{field}}”：不导入指向 {{detail}} 的关联，因为这些记录在不同环境中不同"
+  "\"{{collection}}.{{field}}\": links to {{detail}} are not imported, because those records differ between environments": "“{{collection}}.{{field}}”：不导入指向 {{detail}} 的关联，因为这些记录在不同环境中不同",
+  "The new name for \"{{collection}}\" cannot be used ({{detail}})": "“{{collection}}”的新名称不可用（{{detail}}）",
+  "The categories chosen for \"{{collection}}\" do not exist here": "为“{{collection}}”选择的分类在此环境中不存在",
+  "The SQL of \"{{collection}}\" still reads \"{{detail}}\"; edit the query after importing if it should read the renamed collection": "“{{collection}}”的 SQL 仍读取“{{detail}}”；如需读取重命名后的数据表，请在导入后修改查询",
+  "Display name": "显示名称",
+  "Collection name": "数据表名称",
+  "Categories": "分类",
+  "Display name of \"{{name}}\"": "“{{name}}”的显示名称",
+  "Collection name of \"{{name}}\"": "“{{name}}”的数据表名称",
+  "Categories of \"{{name}}\"": "“{{name}}”的分类",
+  "In the file: {{name}}": "文件中：{{name}}",
+  "No category": "无分类",
+  "Names changed. Check them before importing.": "名称已更改，请在导入前检查。",
+  "Check names": "检查名称"
 }

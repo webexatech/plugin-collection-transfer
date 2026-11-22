@@ -26,6 +26,7 @@ import {
   MANIFEST_FILE,
   MAX_IDENTIFIER_LENGTH,
   MIRRORED_ORIGINS,
+  Renames,
   sqlProblem,
   SUPPORTED_TEMPLATES,
   TEMPLATE_PLUGINS,
@@ -95,6 +96,9 @@ export type ProblemCode =
   | 'filesNotCarried'
   | 'dataNotCarried'
   | 'relationRowsNotCarried'
+  | 'sqlNotRenamed'
+  | 'invalidRename'
+  | 'invalidCategory'
   // Listed for confirmation together with expressions
   | 'sqlStatement';
 
@@ -121,10 +125,20 @@ export interface Problem {
 
 export interface PreviewCollection {
   name: string;
+  /** Name in the file; renames and categories are keyed by it. */
+  originalName: string;
   title: string;
   fieldCount: number;
   rowCount: number;
   isThrough: boolean;
+  /** Category names in the source. */
+  categories: string[];
+}
+
+export interface PreviewCategory {
+  id: string | number;
+  name: string;
+  color?: string;
 }
 
 /** One field's UI interface. Only the browser knows which interfaces the target supports, so the client checks. */
@@ -149,6 +163,8 @@ export interface Preview {
   expressions: Problem[];
   // What the import will not do, for the admin to know (not blocking).
   notices: Problem[];
+  // Collection categories of this environment, to choose from per collection.
+  categories: PreviewCategory[];
 }
 
 export interface ImportResult {
@@ -165,7 +181,10 @@ interface LoadedPackage {
   collections: CollectionPayload[];
   associations: AssociationPayload[];
   through: string[];
+  // Keyed by the collection's (possibly renamed) name; meta.name stays the name in the file (its data folder).
   metas: Record<string, DataMeta>;
+  // Current name → name in the file.
+  origin: Record<string, string>;
 }
 
 export interface ImportOptions {
@@ -174,6 +193,14 @@ export interface ImportOptions {
   resolutions?: Record<string, ConflictMode>;
   /** The admin confirmed they trust the file's expressions (see Preview.expressions). */
   trustExpressions?: boolean;
+  /** New names / display names, keyed by the collection's name in the file. */
+  renames?: unknown;
+  /** Category ids of this environment, keyed by the collection's name in the file. */
+  categories?: unknown;
+}
+
+export interface PreviewOptions {
+  renames?: unknown;
 }
 
 interface CollectionRepositoryWithLoad {
@@ -213,6 +240,10 @@ async function* readRows(filePath: string, maxRowBytes: number): AsyncGenerator<
   }
   const last = pieces.join('');
   if (last.trim()) yield last;
+}
+
+function categoryNames(collection: CollectionPayload): string[] {
+  return Array.isArray(collection.categories) ? collection.categories.filter((c) => typeof c === 'string') : [];
 }
 
 function isConventionalTableName(name: string, tableName: unknown) {
@@ -378,25 +409,29 @@ export class CollectionImporter {
     });
   }
 
-  async preview(token: string): Promise<Preview> {
-    const pkg = await this.load(token);
-    const problems = await this.check(pkg);
+  async preview(token: string, options: PreviewOptions = {}): Promise<Preview> {
+    const { pkg, problems: renameProblems } = this.applyRenames(await this.load(token), options.renames);
+    const problems = [...renameProblems, ...(await this.check(pkg))];
     const fieldCounts = lodash.countBy(pkg.associations, (a) => a.collectionName);
 
     const collections: PreviewCollection[] = [
       ...pkg.collections.map((c) => ({
         name: c.name,
+        originalName: pkg.origin[c.name] || c.name,
         title: c.title || c.name,
         fieldCount: c.fields.length + (fieldCounts[c.name] || 0),
         rowCount: pkg.metas[c.name]?.count || 0,
         isThrough: false,
+        categories: categoryNames(c),
       })),
       ...pkg.through.map((name) => ({
         name,
+        originalName: name,
         title: name,
         fieldCount: 0,
         rowCount: pkg.metas[name]?.count || 0,
         isThrough: true,
+        categories: [],
       })),
     ];
 
@@ -410,7 +445,143 @@ export class CollectionImporter {
       conflicts: await this.conflicts(pkg),
       expressions: this.expressionsOf(pkg),
       notices: this.noticesOf(pkg),
+      categories: await this.targetCategories(),
     };
+  }
+
+  private async targetCategories(): Promise<PreviewCategory[]> {
+    if (!this.db.hasCollection('collectionCategories')) return [];
+    const rows = await this.db.getRepository('collectionCategories').find({ sort: ['sort'] });
+    return rows.map((row) => ({
+      id: row.get('id') as string | number,
+      name: String(row.get('name')),
+      color: row.get('color') as string | undefined,
+    }));
+  }
+
+  /**
+   * Gives collections of the package other names (and display names) before anything is checked or created. Every
+   * reference inside the package follows: relations, reverse fields, junction collections in the package, parents
+   * of inherited collections, the source columns of view / SQL fields, the manifest. Data folders keep their names
+   * in the file (meta.name). SQL queries are text and are not changed (see notice sqlNotRenamed).
+   */
+  private applyRenames(pkg: LoadedPackage, raw: unknown): { pkg: LoadedPackage; problems: Problem[] } {
+    const problems: Problem[] = [];
+    const names = new Map<string, string>();
+    const titles = new Map<string, string>();
+    const entries = raw && typeof raw === 'object' && !Array.isArray(raw) ? Object.entries(raw) : [];
+    for (const [from, value] of entries) {
+      if (!pkg.manifest.collections.includes(from) || !value || typeof value !== 'object') {
+        problems.push({ code: 'invalidRename', collection: from, detail: 'not a collection of the file' });
+        continue;
+      }
+      const { name, title } = value as { name?: unknown; title?: unknown };
+      if (name !== undefined && name !== null && name !== '' && name !== from) {
+        if (!isValidName(name) || name.length > MAX_IDENTIFIER_LENGTH) {
+          problems.push({ code: 'invalidRename', collection: from, detail: String(name) });
+        } else {
+          names.set(from, name);
+        }
+      }
+      if (typeof title === 'string' && title.trim()) titles.set(from, title.trim().slice(0, 255));
+    }
+    if (!names.size && !titles.size) return { pkg, problems };
+
+    // A junction table generated for a renamed collection's many-to-many field gets a generated name of its own, so a
+    // renamed copy can sit next to the original in the same environment. Derived from the new name: the preview and
+    // the import agree.
+    const owners = this.throughOwners(pkg);
+    const throughNames = new Map<string, string>();
+    for (const through of pkg.through) {
+      const owner = owners[through];
+      if (!names.has(owner)) continue;
+      const hash = crypto
+        .createHash('sha1')
+        .update(`${names.get(owner)}:${through}`)
+        .digest('hex');
+      throughNames.set(through, `t_${hash.slice(0, 11)}`);
+    }
+    const rename = (name: string) => names.get(name) ?? throughNames.get(name) ?? name;
+    const finalNames = [
+      ...pkg.manifest.collections.map(rename),
+      ...pkg.through.map(rename),
+      ...pkg.manifest.dependencies,
+    ];
+    for (const [from, to] of names) {
+      if (finalNames.filter((name) => name === to).length > 1) {
+        problems.push({ code: 'invalidRename', collection: from, detail: `${to} is used twice` });
+      }
+    }
+    const renameSource = <T extends Record<string, unknown>>(field: T): T => {
+      if (typeof field?.source !== 'string' || !field.source.includes('.')) return field;
+      const [collection, ...rest] = field.source.split('.');
+      return { ...field, source: [rename(collection), ...rest].join('.') };
+    };
+
+    const collections = pkg.collections.map((collection) => {
+      const next: CollectionPayload = { ...collection, name: rename(collection.name) };
+      if (titles.has(collection.name)) next.title = titles.get(collection.name);
+      if (names.has(collection.name)) {
+        // The table follows the new name; a view collection keeps reading its view.
+        if (isConventionalTableName(collection.name, collection.tableName)) delete next.tableName;
+        if (templateOf(collection) === 'view' && !collection.viewName) next.viewName = collection.name;
+      }
+      if (collection.inherits) {
+        next.inherits = lodash.castArray(collection.inherits as string | string[]).map(rename);
+      }
+      next.fields = (collection.fields || []).map(renameSource);
+      return next;
+    });
+    const associations = pkg.associations.map((association) => ({
+      ...renameSource(association),
+      collectionName: rename(association.collectionName),
+      target: rename(association.target),
+      ...(typeof association.through === 'string' ? { through: rename(association.through) } : {}),
+      ...(association.reverseField ? { reverseField: renameSource(association.reverseField) } : {}),
+    }));
+    const metas: Record<string, DataMeta> = {};
+    for (const [name, meta] of Object.entries(pkg.metas)) metas[rename(name)] = meta;
+    const origin: Record<string, string> = {};
+    for (const name of pkg.manifest.collections) origin[rename(name)] = name;
+
+    return {
+      pkg: {
+        ...pkg,
+        manifest: {
+          ...pkg.manifest,
+          selected: pkg.manifest.selected.map(rename),
+          collections: pkg.manifest.collections.map(rename),
+          through: pkg.manifest.through.map(rename),
+        },
+        collections,
+        associations,
+        through: pkg.through.map(rename),
+        metas,
+        origin: { ...pkg.origin, ...origin },
+      },
+      problems,
+    };
+  }
+
+  /** Category ids per collection (current name), from the admin's choice keyed by the name in the file. */
+  private async categoryChoice(pkg: LoadedPackage, raw: unknown, problems: Problem[]) {
+    const choice = new Map<string, (string | number)[]>();
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return choice;
+    const known = new Set((await this.targetCategories()).map((category) => String(category.id)));
+    const currentOf = lodash.invert(pkg.origin);
+    for (const [original, ids] of Object.entries(raw)) {
+      const name = currentOf[original];
+      const valid =
+        !!name &&
+        Array.isArray(ids) &&
+        ids.every((id) => ['string', 'number'].includes(typeof id) && known.has(String(id)));
+      if (!valid) {
+        problems.push({ code: 'invalidCategory', collection: original });
+        continue;
+      }
+      choice.set(name, ids as (string | number)[]);
+    }
+    return choice;
   }
 
   /** Things the import does not carry, so the admin is not surprised afterwards. */
@@ -423,6 +594,17 @@ export class CollectionImporter {
       }
       if (pkg.manifest.includeData && DATALESS_TEMPLATES.includes(template)) {
         notices.push({ code: 'dataNotCarried', collection: collection.name, detail: template });
+      }
+    }
+    // SQL queries are text: a renamed collection they read is not renamed in them.
+    const renamedFrom = Object.entries(pkg.origin).filter(([current, original]) => current !== original);
+    for (const collection of pkg.collections) {
+      if (templateOf(collection) !== 'sql' || typeof collection.sql !== 'string') continue;
+      for (const [, original] of renamedFrom) {
+        const pattern = new RegExp(`(^|[^A-Za-z0-9_])${lodash.escapeRegExp(original)}($|[^A-Za-z0-9_])`);
+        if (pattern.test(collection.sql)) {
+          notices.push({ code: 'sqlNotRenamed', collection: collection.name, detail: original });
+        }
       }
     }
     for (const junction of this.externalJunctions(pkg)) {
@@ -462,10 +644,12 @@ export class CollectionImporter {
    *   because user ids from the source environment do not identify the same people here.
    */
   async import(token: string, options: ImportOptions = {}): Promise<ImportResult> {
-    const pkg = await this.load(token);
+    const renamed = this.applyRenames(await this.load(token), options.renames);
+    const { pkg } = renamed;
     const { manifest } = pkg;
     // The target may have changed since the preview, so every check runs again.
-    const problems = await this.check(pkg);
+    const problems = [...renamed.problems, ...(await this.check(pkg))];
+    const categories = await this.categoryChoice(pkg, options.categories, problems);
     const conflicts = await this.conflicts(pkg);
     const expressions = this.expressionsOf(pkg);
     if (expressions.length && options.trustExpressions !== true) {
@@ -546,9 +730,11 @@ export class CollectionImporter {
             'key',
             'sort',
             'category',
+            'categories',
             ...(isConventionalTableName(collection.name, collection.tableName) ? ['tableName'] : []),
           ]),
           fields: collection.fields.map((field) => lodash.omit(field, NESTED_FIELD_STRIP)),
+          ...(categories.has(collection.name) ? { category: categories.get(collection.name) } : {}),
         };
         await collectionsRepository.create({ values, context: {}, transaction });
       }
@@ -788,7 +974,8 @@ export class CollectionImporter {
       }
     }
 
-    return { manifest, collections, associations, through, metas };
+    const origin = Object.fromEntries((manifest.collections || []).map((name) => [name, name]));
+    return { manifest, collections, associations, through, metas, origin };
   }
 
   /**
@@ -1342,7 +1529,8 @@ export class CollectionImporter {
     intoExisting = false,
     storageIds?: Map<string, unknown>,
   ): Promise<number> {
-    const dataPath = path.join(this.packageDir(token), dataDir(name), 'data');
+    // The data folder has the collection's name in the file, also after a rename.
+    const dataPath = path.join(this.packageDir(token), dataDir(meta.name), 'data');
     const exists = await fsPromises
       .stat(dataPath)
       .then(() => true)

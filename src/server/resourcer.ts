@@ -135,8 +135,28 @@ export default {
       await next();
     },
 
+    /** The preview again for an uploaded package, with new names / display names for its collections. No writes. */
+    async check(ctx: Context, next: Next) {
+      const { token, renames } = ctx.action.params.values || {};
+      if (typeof token !== 'string') {
+        ctx.throw(400, ctx.t('Upload a package file', { ns: NS }));
+      }
+      try {
+        ctx.body = await new CollectionImporter(ctx.app).preview(token, { renames });
+      } catch (error) {
+        ctx.throw(400, errorMessage(error));
+      }
+      await next();
+    },
+
     async import(ctx: Context, next: Next) {
-      const { token, resolutions: rawResolutions, trustExpressions } = ctx.action.params.values || {};
+      const {
+        token,
+        resolutions: rawResolutions,
+        trustExpressions,
+        renames,
+        categories,
+      } = ctx.action.params.values || {};
       // Only known modes for valid names are passed on; anything else counts as unresolved.
       const resolutions: Record<string, ConflictMode> = {};
       if (rawResolutions && typeof rawResolutions === 'object' && !Array.isArray(rawResolutions)) {
@@ -154,6 +174,9 @@ export default {
           userId,
           resolutions,
           trustExpressions: trustExpressions === true,
+          // Validated by the importer.
+          renames,
+          categories,
         });
       } catch (error) {
         if (error instanceof ImportBlockedError) {

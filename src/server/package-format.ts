@@ -68,7 +68,12 @@ export type CollectionPayload = Record<string, unknown> & {
   title?: string;
   template?: string;
   fields: FieldPayload[];
+  /** Names of the collection categories in the source (absent in packages from 0.1.5 and earlier). */
+  categories?: string[];
 };
+
+/** Per collection of the package (by its name in the file): a new name and/or display name for the import. */
+export type Renames = Record<string, { name?: string; title?: string }>;
 
 export type AssociationPayload = FieldPayload & {
   collectionName: string;

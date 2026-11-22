@@ -191,8 +191,14 @@ export class CollectionExporter {
   }
 
   private async collectionRows(): Promise<Row[]> {
-    const models: Model[] = await this.db.getRepository('collections').find({ sort: ['sort'] });
-    return models.map((model) => model.get() as Row);
+    const hasCategories = this.db.hasCollection('collectionCategories');
+    const models: Model[] = await this.db
+      .getRepository('collections')
+      .find({ sort: ['sort'], ...(hasCategories ? { appends: ['category'] } : {}) });
+    return models.map((model) => {
+      const categories = ((model.get('category') as Model[] | undefined) || []).map((c) => String(c.get('name')));
+      return { ...(model.get() as Row), categories };
+    });
   }
 
   private async fieldRowsOf(collectionNames: string[]): Promise<Row[]> {

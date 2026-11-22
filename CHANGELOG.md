@@ -2,6 +2,14 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.2.0
+
+- **Rename on import**: the import preview lets you change each collection's display name and collection name (e.g. to
+  import a copy next to an existing collection). References inside the file follow, junction tables of renamed
+  collections get new names, and the checks run again with the new names.
+- **Categories on import**: choose the collection categories per collection in the import preview; categories with the
+  same name as in the source are pre-selected. Exports now carry category names.
+
 ## 0.1.5
 
 - **All collection templates that ship with NocoBase** can be transferred: tree (paths rebuilt), file (records follow
