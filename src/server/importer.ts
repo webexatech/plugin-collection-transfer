@@ -1,4 +1,4 @@
-import { Collection, Database, Transaction } from '@nocobase/database';
+import { Collection, Database, RelationField, Transaction } from '@nocobase/database';
 import { Application } from '@nocobase/server';
 import { storagePathJoin } from '@nocobase/utils';
 import crypto from 'crypto';
@@ -151,23 +151,34 @@ interface CollectionRepositoryWithLoad {
  * memory, so a single huge line cannot exhaust memory.
  */
 async function* readRows(filePath: string, maxRowBytes: number): AsyncGenerator<string> {
-  const tooLarge = (text: string) => Buffer.byteLength(text) > maxRowBytes;
   const rowTooLarge = () => new Error('A data row is larger than the allowed row size');
-  let pending = '';
-  for await (const chunk of fs.createReadStream(filePath, { encoding: 'utf8' })) {
-    pending += chunk as string;
-    let index = pending.indexOf('\n');
+  // The unfinished row is kept as a list of pieces with a running byte count: each chunk is scanned once for newlines
+  // and nothing is re-scanned or re-measured, so a long row costs linear time up to the limit.
+  let pieces: string[] = [];
+  let pendingBytes = 0;
+  for await (const value of fs.createReadStream(filePath, { encoding: 'utf8' })) {
+    const chunk = value as string;
+    let start = 0;
+    let index = chunk.indexOf('\n');
     while (index >= 0) {
-      const line = pending.slice(0, index).replace(/\r$/, '');
-      pending = pending.slice(index + 1);
-      // Every complete row is checked, not only the unfinished remainder of a chunk.
-      if (tooLarge(line)) throw rowTooLarge();
+      const piece = chunk.slice(start, index);
+      if (pendingBytes + Buffer.byteLength(piece) > maxRowBytes) throw rowTooLarge();
+      const line = (pieces.length ? pieces.join('') + piece : piece).replace(/\r$/, '');
+      pieces = [];
+      pendingBytes = 0;
       if (line) yield line;
-      index = pending.indexOf('\n');
+      start = index + 1;
+      index = chunk.indexOf('\n', start);
     }
-    if (tooLarge(pending)) throw rowTooLarge();
+    const rest = chunk.slice(start);
+    if (rest) {
+      pendingBytes += Buffer.byteLength(rest);
+      if (pendingBytes > maxRowBytes) throw rowTooLarge();
+      pieces.push(rest);
+    }
   }
-  if (pending.trim()) yield pending;
+  const last = pieces.join('');
+  if (last.trim()) yield last;
 }
 
 export class ImportBlockedError extends Error {
@@ -783,13 +794,29 @@ export class CollectionImporter {
       // Fields nested in a collection are plain columns; relations are only accepted from associations.json, where the
       // checks below apply. A relation hidden here could otherwise point at collections outside the package.
       for (const field of collection.fields || []) {
+        // Decided by the registered field class, so relation types added by plugins are covered too.
+        const fieldClass = this.db.fieldTypes.get(field.type) as { prototype?: unknown } | undefined;
+        const isRelation = !!fieldClass?.prototype && fieldClass.prototype instanceof RelationField;
         const relationKeys = ['target', 'through', 'foreignKey', 'otherKey', 'sourceKey', 'targetKey'];
-        if (
-          ASSOCIATION_TYPES_FOR_REFERENCES.includes(field.type) ||
-          relationKeys.some((key) => field[key] !== undefined && field[key] !== null)
-        ) {
+        if (isRelation || relationKeys.some((key) => field[key] !== undefined && field[key] !== null)) {
           outside(collection.name, 'relation fields are only allowed in associations.json', field.name);
         }
+      }
+    }
+
+    // Exports flatten `options` into top-level keys. A raw `options` object would be stored as is and bypass every
+    // check on top-level keys (e.g. options.tableName), so it is refused wherever it appears.
+    const hasRawOptions = (value: Record<string, unknown> | undefined) =>
+      !!value && Object.prototype.hasOwnProperty.call(value, 'options');
+    for (const collection of pkg.collections) {
+      if (hasRawOptions(collection)) outside(collection.name, 'raw "options" is not allowed');
+      for (const field of collection.fields || []) {
+        if (hasRawOptions(field)) outside(collection.name, 'raw "options" is not allowed', field.name);
+      }
+    }
+    for (const association of pkg.associations) {
+      if (hasRawOptions(association) || hasRawOptions(association.reverseField)) {
+        outside(String(association.collectionName), 'raw "options" is not allowed', association.name);
       }
     }
 

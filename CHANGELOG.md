@@ -2,6 +2,16 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.1.2 – NocoBase 2.2.x
+
+Security hardening of the import (upgrade recommended):
+
+- Raw `options` objects in collections, fields and relations are refused; they would otherwise bypass the checks on
+  top-level keys (for example `options.tableName`).
+- Relation fields among a collection's plain fields are recognised by their registered field class, so relation types
+  added by plugins are refused there too.
+- Reading data rows costs linear time up to the row size limit.
+
 ## 0.1.1 – NocoBase 2.2.x
 
 Security hardening of the import (upgrade recommended):

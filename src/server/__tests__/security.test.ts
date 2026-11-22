@@ -110,6 +110,29 @@ describe('import security', () => {
     expect(Object.keys(usersColumns)).not.toContain('evilProjectId');
   });
 
+  it('refuses raw options objects that would bypass the checks on top-level keys', async () => {
+    const { importer, token } = await tampered(async (dir) => {
+      await rewrite(path.join(dir, COLLECTIONS_FILE), (c: Row[]) => {
+        c[0].options = { tableName: 'users' };
+        (c[1].fields as Row[]).push({ name: 'sneaky', type: 'string', options: { target: 'users' } });
+        // A relation type without any relation keys is still recognised by its field class.
+        (c[2].fields as Row[]).push({ name: 'bare', type: 'belongsTo' });
+      });
+    });
+    const preview = await importer.preview(token);
+    const outside = preview.problems
+      .filter((p) => p.code === 'outsidePackage')
+      .map((p) => `${p.collection}:${p.field ?? ''}:${p.detail}`);
+    expect(outside).toEqual(
+      expect.arrayContaining([
+        'projects::raw "options" is not allowed',
+        'tasks:sneaky:raw "options" is not allowed',
+        'tags:bare:relation fields are only allowed in associations.json',
+      ]),
+    );
+    await expect(importer.import(token)).rejects.toBeInstanceOf(ImportBlockedError);
+  });
+
   it('refuses archive entries beyond the size limit', async () => {
     const original = { ...CollectionImporter.limits };
     CollectionImporter.limits = { ...original, maxEntryBytes: 64 };
