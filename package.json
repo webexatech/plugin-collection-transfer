@@ -1,0 +1,57 @@
+{
+  "name": "@webexatech/plugin-collection-transfer",
+  "displayName": "Collection transfer",
+  "displayName.zh-CN": "数据表迁移",
+  "description": "Move collections between NocoBase environments: export one or more collections (schema, optionally data) to a file and import it elsewhere, with per-collection conflict handling.",
+  "description.zh-CN": "在 NocoBase 环境之间迁移数据表：将一个或多个数据表（结构，可选包含数据）导出为文件并导入到其他环境，支持逐表冲突处理。",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "author": "Webexa Technologies LLP",
+  "homepage": "https://github.com/webexatech/plugin-collection-transfer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webexatech/plugin-collection-transfer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/webexatech/plugin-collection-transfer/issues"
+  },
+  "main": "dist/server/index.js",
+  "files": [
+    "dist",
+    "dist/node_modules/**",
+    "client.js",
+    "client.d.ts",
+    "client-v2.js",
+    "client-v2.d.ts",
+    "server.js",
+    "server.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "nocobase": {
+    "supportedVersions": [
+      "2.x"
+    ]
+  },
+  "devDependencies": {
+    "@types/archiver": "^5.3.1",
+    "@xhmikosr/decompress": "^11.1.4",
+    "archiver": "^5.3.1",
+    "@types/yauzl": "^2.10.3",
+    "yauzl": "^3.3.0"
+  },
+  "peerDependencies": {
+    "@nocobase/actions": "2.x",
+    "@nocobase/client": "2.x",
+    "@nocobase/client-v2": "2.x",
+    "@nocobase/database": "2.x",
+    "@nocobase/plugin-data-source-main": "2.x",
+    "@nocobase/server": "2.x",
+    "@nocobase/test": "2.x",
+    "@nocobase/utils": "2.x"
+  },
+  "keywords": [
+    "System management"
+  ]
+}
