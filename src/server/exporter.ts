@@ -18,15 +18,18 @@ import {
   COLLECTIONS_FILE,
   CollectionPayload,
   dataDir,
+  DATALESS_TEMPLATES,
   DataMeta,
   FIELD_BOOKKEEPING_KEYS,
   FieldPayload,
   FORMAT_VERSION,
   isValidName,
+  isVirtual,
   Manifest,
   MANIFEST_FILE,
   MIRRORED_ORIGINS,
   SUPPORTED_TEMPLATES,
+  templateOf,
   THROUGH_FILE,
 } from './package-format';
 // @ts-ignore
@@ -56,12 +59,9 @@ export interface ExportResult {
 }
 
 function unsupportedReason(row: Row): string | undefined {
-  const template = (row.template as string) || 'general';
+  const template = templateOf(row);
   if (!SUPPORTED_TEMPLATES.includes(template)) {
     return `template:${template}`;
-  }
-  if (!lodash.isEmpty(row.inherits)) {
-    return 'inherits';
   }
   if (!isValidName(row.name)) {
     return 'name';
@@ -114,7 +114,7 @@ export class CollectionExporter {
       return {
         name,
         title: (row.title as string) || name,
-        template: (row.template as string) || 'general',
+        template: templateOf(row),
         supported: !reason,
         unsupportedReason: reason,
         related: [...(related.get(name) || [])].sort(),
@@ -153,6 +153,7 @@ export class CollectionExporter {
         fieldRows,
       );
 
+      const storages = await this.storageNames(collections, rowsByName, !!options.includeData);
       const manifest: Manifest = {
         formatVersion: FORMAT_VERSION,
         pluginVersion: pkg.version,
@@ -165,6 +166,7 @@ export class CollectionExporter {
         through,
         dependencies,
         plugins: enabledPluginNames(this.app),
+        ...(storages ? { storages } : {}),
       };
 
       await this.writeJson(workDir, COLLECTIONS_FILE, collectionPayloads);
@@ -172,7 +174,8 @@ export class CollectionExporter {
       await this.writeJson(workDir, THROUGH_FILE, through);
 
       for (const name of [...collections, ...through]) {
-        await this.dumpCollection(workDir, name, manifest.includeData);
+        const dataless = DATALESS_TEMPLATES.includes(templateOf(rowsByName[name] || {}));
+        await this.dumpCollection(workDir, name, manifest.includeData && !dataless);
       }
 
       await this.writeJson(workDir, MANIFEST_FILE, manifest);
@@ -213,6 +216,19 @@ export class CollectionExporter {
     const fieldRows: Row[] = [];
 
     while (pending.length) {
+      // Parents of inherited collections (PostgreSQL) are companions too: the child table cannot exist without them.
+      for (const name of pending) {
+        for (const parent of lodash.castArray((rowsByName[name]?.inherits as string | string[]) || [])) {
+          if (collections.includes(parent)) continue;
+          const parentRow = rowsByName[parent];
+          const reason = parentRow ? unsupportedReason(parentRow) : 'missing';
+          if (!parentRow || !isUserCollection(parentRow) || reason) {
+            throw new Error(`Parent collection "${parent}" of "${name}" cannot be transferred (${reason || 'system'})`);
+          }
+          collections.push(parent);
+          pending.push(parent);
+        }
+      }
       const rows = await this.fieldRowsOf(pending);
       fieldRows.push(...rows);
       pending = [];
@@ -248,7 +264,43 @@ export class CollectionExporter {
       }
     }
 
-    return { collections, through, fieldRows };
+    return { collections: this.parentsFirst(collections, rowsByName), through, fieldRows };
+  }
+
+  /** Orders collections so that every parent of an inherited collection is created before its children. */
+  private parentsFirst(collections: string[], rowsByName: Record<string, Row>) {
+    const ordered: string[] = [];
+    const visit = (name: string, trail: string[]) => {
+      if (ordered.includes(name) || !collections.includes(name)) return;
+      if (trail.includes(name)) throw new Error(`Inheritance cycle: ${[...trail, name].join(' → ')}`);
+      for (const parent of lodash.castArray((rowsByName[name]?.inherits as string | string[]) || [])) {
+        visit(parent, [...trail, name]);
+      }
+      ordered.push(name);
+    };
+    collections.forEach((name) => visit(name, []));
+    return ordered;
+  }
+
+  /**
+   * Storage id → name of the storages the records of file collections are in (records refer to storages by id; the
+   * target matches them by name).
+   */
+  private async storageNames(collections: string[], rowsByName: Record<string, Row>, includeData: boolean) {
+    const files = collections.filter((name) => templateOf(rowsByName[name]) === 'file');
+    if (!includeData || !files.length || !this.db.hasCollection('storages')) return undefined;
+    const used = new Set<string>();
+    for (const name of files) {
+      const rows = (await this.db.getCollection(name).model.findAll({
+        attributes: ['storageId'],
+        group: ['storageId'],
+        raw: true,
+      })) as unknown as Row[];
+      rows.forEach((row) => row.storageId !== null && row.storageId !== undefined && used.add(String(row.storageId)));
+    }
+    if (!used.size) return undefined;
+    const storages: Model[] = await this.db.getRepository('storages').find({ filter: { id: { $in: [...used] } } });
+    return Object.fromEntries(storages.map((storage) => [String(storage.get('id')), String(storage.get('name'))]));
   }
 
   private buildPayloads(collections: string[], through: string[], rowsByName: Record<string, Row>, fieldRows: Row[]) {
@@ -256,13 +308,29 @@ export class CollectionExporter {
     const fieldsByCollection = lodash.groupBy(fieldRows, (field) => field.collectionName as string);
     const fieldsByKey = lodash.keyBy(fieldRows, (field) => field.key as string);
 
+    // Key columns that NocoBase recreates on import from an exported relation (collection.column).
+    const recreatedKeys = new Set<string>();
+    for (const field of fieldRows) {
+      const { type, foreignKey, otherKey, through, target } = field as Record<string, string>;
+      if (!collections.includes(field.collectionName as string)) continue;
+      if (type === 'belongsTo') recreatedKeys.add(`${field.collectionName}.${foreignKey}`);
+      if (type === 'hasMany' || type === 'hasOne') recreatedKeys.add(`${target}.${foreignKey}`);
+      if (type === 'belongsToMany') {
+        recreatedKeys.add(`${through}.${foreignKey}`);
+        recreatedKeys.add(`${through}.${otherKey}`);
+      }
+    }
+
     const collectionPayloads: CollectionPayload[] = collections.map((name) => {
       const row = rowsByName[name];
       const scalarFields = (fieldsByCollection[name] || [])
-        // Key columns created by relations are recreated by NocoBase on import, except a primary key that is also
+        // Key columns of exported relations are recreated by NocoBase on import, except a primary key that is also
         // used as a foreign key (e.g. a belongsTo with foreignKey "id"): without it the collection would have no key.
+        // Other key columns (their relation was deleted, or lives outside the package) are plain columns.
         .filter(
-          (field) => !ASSOCIATION_TYPES.includes(field.type as string) && (!field.isForeignKey || field.primaryKey),
+          (field) =>
+            !ASSOCIATION_TYPES.includes(field.type as string) &&
+            (!field.isForeignKey || field.primaryKey || !recreatedKeys.has(`${name}.${field.name}`)),
         )
         .map((field) => this.fieldPayload(field));
       return {
@@ -322,8 +390,12 @@ export class CollectionExporter {
 
     const rawAttributes = collection.model.getAttributes();
     const columnToAttribute = new Map<string, string>();
+    const columnToAttributes = new Map<string, string[]>();
     for (const [attributeName, attribute] of Object.entries(rawAttributes)) {
-      columnToAttribute.set(attribute.field || attributeName, attributeName);
+      if (isVirtual(attribute)) continue; // no column (e.g. computed or plugin helper attributes)
+      const column = attribute.field || attributeName;
+      columnToAttribute.set(column, attributeName);
+      columnToAttributes.set(column, [...(columnToAttributes.get(column) || []), attributeName]);
     }
     const columns = [...columnToAttribute.keys()];
 
@@ -332,7 +404,9 @@ export class CollectionExporter {
     let count = 0;
     if (includeData && columns.length) {
       const stream = fs.createWriteStream(path.join(dir, 'data'));
-      const rows = await this.db.sequelize.query<Row>(`SELECT * FROM ${collection.quotedTableName()}`, {
+      // ONLY: on PostgreSQL a parent table would otherwise also return the rows of inherited collections.
+      const only = this.db.inDialect('postgres') ? 'ONLY ' : '';
+      const rows = await this.db.sequelize.query<Row>(`SELECT * FROM ${only}${collection.quotedTableName()}`, {
         type: QueryTypes.SELECT,
       });
       for (const row of rows) {
@@ -354,6 +428,7 @@ export class CollectionExporter {
       autoIncrementColumn: autoIncrementAttribute ? autoIncrementAttribute[1].field || autoIncrementAttribute[0] : null,
       // Column → field name, so the target can map columns when its naming differs (e.g. DB_UNDERSCORED).
       attributes: Object.fromEntries(columns.map((column) => [column, columnToAttribute.get(column)])),
+      aliases: Object.fromEntries([...columnToAttributes].filter(([, names]) => names.length > 1)),
     };
     await fsPromises.writeFile(path.join(dir, 'meta'), JSON.stringify(meta), 'utf8');
   }

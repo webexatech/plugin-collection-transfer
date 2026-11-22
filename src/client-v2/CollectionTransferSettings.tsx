@@ -121,6 +121,8 @@ interface Preview {
   missingPlugins: string[];
   conflicts: PreviewConflict[];
   expressions: Problem[];
+  /** Not blocking: what the import does not carry (absent in plugin versions before 0.1.5). */
+  notices?: Problem[];
 }
 
 interface ImportResult {
@@ -168,7 +170,33 @@ function problemMessage(t: Translate, problem: Problem) {
     case 'unknownFieldType':
       return t('Field "{{collection}}.{{field}}" uses type "{{detail}}", which is not available here', values);
     case 'unsupportedTemplate':
-      return t('Collection "{{collection}}" uses template "{{detail}}", which cannot be transferred yet', values);
+      return t('Collection "{{collection}}" uses template "{{detail}}", which cannot be transferred', values);
+    case 'missingTemplatePlugin':
+      return t('Collection "{{collection}}" needs the plugin {{detail}}; enable it here first', values);
+    case 'inheritanceNeedsPostgres':
+      return t('Collection "{{collection}}" inherits from another collection, which needs PostgreSQL', values);
+    case 'missingView':
+      return t('View collection "{{collection}}" needs the database view "{{detail}}"; create it here first', values);
+    case 'missingDatabaseServer':
+      return t('Collection "{{collection}}" needs the database server "{{detail}}"; add it here first', values);
+    case 'missingStorage':
+      return t('File collection "{{collection}}" needs the file storage "{{detail}}"; add it here first', values);
+    case 'unsafeSql':
+      return t('The SQL of collection "{{collection}}" is not allowed ({{detail}})', values);
+    case 'sqlStatement':
+      return t('"{{collection}}" runs this SQL: {{detail}}', values);
+    case 'filesNotCarried':
+      return t(
+        'File collection "{{collection}}": the file records are imported, the files themselves are not. They must be reachable in a storage of the same name here.',
+        values,
+      );
+    case 'relationRowsNotCarried':
+      return t(
+        '"{{collection}}.{{field}}": links to {{detail}} are not imported, because those records differ between environments',
+        values,
+      );
+    case 'dataNotCarried':
+      return t('"{{collection}}" ({{detail}}) has no data of its own; it shows the data of this environment', values);
     case 'identifierTooLong':
       return t('Name "{{detail}}" in "{{collection}}" is too long for the database', {
         ...values,
@@ -438,6 +466,7 @@ const ImportPanel: React.FC = () => {
   const includeData = !!preview?.manifest.includeData;
   const conflicts = preview?.conflicts || [];
   const expressions = preview?.expressions || [];
+  const notices = preview?.notices || [];
   const overridden = conflicts.filter((conflict) => OVERRIDE_MODES.includes(resolutions[conflict.name]));
   // Collections recreated by this import: new ones plus overridden ones. Fields elsewhere that point at an overridden
   // collection are removed by NocoBase unless their own collection is recreated here too.
@@ -641,13 +670,25 @@ const ImportPanel: React.FC = () => {
               pagination={false}
             />
 
+            {notices.length > 0 && (
+              <Alert
+                type="info"
+                showIcon
+                message={t('Not part of the import')}
+                description={
+                  <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+                    {notices.map((notice) => (
+                      <li key={`${notice.code}-${notice.collection}-${notice.field}`}>{problemMessage(t, notice)}</li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
             {expressions.length > 0 && (
               <Alert
                 type="warning"
                 showIcon
-                message={t(
-                  'This file contains expressions that NocoBase evaluates when it shows these titles or descriptions',
-                )}
+                message={t('This file contains expressions or SQL queries that NocoBase evaluates in this environment')}
                 description={
                   <Space direction="vertical" size={4}>
                     <ul style={{ margin: 0, paddingInlineStart: 20 }}>
@@ -659,7 +700,7 @@ const ImportPanel: React.FC = () => {
                     </ul>
                     <span>{t('Only import files from environments you trust.')}</span>
                     <Checkbox checked={trusted} onChange={(event) => setTrusted(event.target.checked)}>
-                      {t('I trust this file and want to import these expressions')}
+                      {t('I trust this file and want to import them')}
                     </Checkbox>
                   </Space>
                 }

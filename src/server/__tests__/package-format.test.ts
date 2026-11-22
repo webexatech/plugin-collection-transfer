@@ -1,4 +1,4 @@
-import { findUnsafeExpression, findUnsafeExpressionInUi } from '../package-format';
+import { findUnsafeExpression, findUnsafeExpressionInUi, findUnsafeTextsInUi, sqlProblem } from '../package-format';
 
 describe('findUnsafeExpression', () => {
   it('allows plain translations', () => {
@@ -35,5 +35,36 @@ describe('findUnsafeExpressionInUi', () => {
       '{{ fetch("/x") }}',
     );
     expect(findUnsafeExpressionInUi(undefined)).toBeUndefined();
+  });
+});
+
+describe('findUnsafeTextsInUi', () => {
+  it('lists every affected text in full', () => {
+    expect(
+      findUnsafeTextsInUi({
+        description: 'Total: ({{a}} || 0) + ({{b}} || 0)',
+        uiSchema: { title: '{{t("Ok")}}', 'x-component-props': { tip: 'see {{ window.x }}' } },
+        expression: '{{a}} + {{b}}',
+      }),
+    ).toEqual(['Total: ({{a}} || 0) + ({{b}} || 0)', 'see {{ window.x }}']);
+  });
+});
+
+describe('sqlProblem', () => {
+  it('accepts one read-only query', () => {
+    expect(sqlProblem('SELECT id, title FROM areas')).toBeUndefined();
+    expect(sqlProblem('select * from a join b on a.id = b."aId";')).toBeUndefined();
+    expect(sqlProblem('WITH t AS (SELECT id FROM a) SELECT * FROM t')).toBeUndefined();
+    expect(sqlProblem('SELECT "updatedAt", "createdById" FROM a')).toBeUndefined();
+  });
+
+  it('refuses anything that could write, read server internals or run more than one statement', () => {
+    expect(sqlProblem('')).toBe('empty query');
+    expect(sqlProblem('DELETE FROM users')).toBe('not a SELECT statement');
+    expect(sqlProblem('SELECT 1; DROP TABLE users')).toBe('more than one statement');
+    expect(sqlProblem('WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d')).toBe('uses "delete"');
+    expect(sqlProblem('SELECT * INTO copy FROM users')).toBe('uses "into"');
+    expect(sqlProblem("SELECT pg_read_file('/etc/passwd')")).toBe('uses "pg_"');
+    expect(sqlProblem('SELECT * FROM information_schema.tables')).toBe('uses "information_schema"');
   });
 });

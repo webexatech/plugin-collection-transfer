@@ -4,6 +4,15 @@ All notable changes to this plugin are documented here. Versions follow [semver]
 
 ## 0.1.5
 
+- **All collection templates that ship with NocoBase** can be transferred: tree (paths rebuilt), file (records follow
+  the storage of the same name; files are not copied), calendar, comment, expression, inherited (PostgreSQL; parents
+  are added automatically), SQL, view and foreign data (definitions only). The preview names a missing template
+  plugin, database view, database server or file storage, lists SQL queries for confirmation, and says what is not
+  carried.
+- Fixed: import failed with `NocoBase did not create: collection t_…` for attachment fields (their junction tables have
+  no collection row). Links of many-to-many fields to collections outside the package (attachments, users) are no
+  longer imported, since those ids identify other records in the target; the preview says so.
+- Fixed: helper attributes without a database column (e.g. file collections' `local`) were exported as columns.
 - **Expressions in titles and descriptions** (e.g. formula notes like `({{VTOTALBASE}} || 0)` in a field description) no
   longer block the import: the preview lists them and the import runs after you confirm **I trust this file**.
 - Fixed: collections without generated id lost their primary key on export when the key was also used as a foreign key

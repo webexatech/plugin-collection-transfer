@@ -9,7 +9,7 @@ import { COLLECTIONS_FILE } from '../package-format';
 import { createAssociation, createGeneralCollection, TEST_PLUGINS } from './helpers';
 
 type Row = Record<string, unknown>;
-const PLUGINS = [...TEST_PLUGINS, 'field-formula'];
+const PLUGINS = [...TEST_PLUGINS, 'field-formula', 'workflow', 'workflow-dynamic-calculation'];
 
 // Schemas seen in real installations: snake_case column names (DB_UNDERSCORED), a primary key that is also used as
 // a foreign key, a junction table without a collection-manager row, formula notes in field descriptions.
@@ -120,6 +120,111 @@ describe('real-world schemas', () => {
     expect(String(purchase.get('id'))).toBe(String(vendorId));
     const vendor = await tdb.getRepository('Bullion_vendor').findOne({ appends: ['Recording'] });
     expect(vendor.get('Recording').map((r) => r.get('Label'))).toEqual(['Call 1']);
+  });
+
+  it('moves expression collections (Workflow: Dynamic calculation) like general ones', async () => {
+    source = await createMockServer({ plugins: PLUGINS });
+    const sdb = source.db;
+    await createGeneralCollection(sdb, 'Stock_In', 'Stock in', [{ name: 'Qty', type: 'double', interface: 'number' }]);
+    await sdb.getRepository('collections').create({
+      values: {
+        name: 'testGroup',
+        title: 'Test group',
+        template: 'expression',
+        createdBy: true,
+        updatedBy: true,
+        fields: [
+          { name: 'engine', type: 'string', interface: 'radioGroup' },
+          { name: 'sourceCollection', type: 'string', interface: 'select' },
+          { name: 'expression', type: 'text', interface: 'expression' },
+        ],
+      },
+      context: {},
+    });
+    await createAssociation(sdb, {
+      collectionName: 'testGroup',
+      name: 'stock',
+      type: 'belongsTo',
+      interface: 'm2o',
+      target: 'Stock_In',
+      foreignKey: 'stockId',
+    });
+    await sdb.getRepository('testGroup').create({
+      values: { engine: 'formula.js', sourceCollection: 'Stock_In', expression: '{{Qty}} * 2' },
+    });
+
+    const exporter = new CollectionExporter(source);
+    expect((await exporter.listCollections()).find((c) => c.name === 'testGroup')).toMatchObject({ supported: true });
+    zipPath = (await exporter.export({ collections: ['Stock_In', 'testGroup'], includeData: true })).filePath;
+    await source.destroy();
+    source = null;
+
+    target = await createMockServer({ plugins: PLUGINS });
+    const importer = new CollectionImporter(target);
+    const token = await importer.receive(zipPath);
+    const preview = await importer.preview(token);
+    expect(preview.problems).toEqual([]);
+    // The stored expression is a value, not UI text: nothing to confirm.
+    expect(preview.expressions).toEqual([]);
+    await importer.import(token);
+    const row = (await target.db.getRepository('collections').findOne({ filter: { name: 'testGroup' } })).get() as Row;
+    expect(row.template).toBe('expression');
+    const group = await target.db.getRepository('testGroup').findOne();
+    expect(group.get('expression')).toBe('{{Qty}} * 2');
+  });
+
+  it('keeps key columns whose relation was deleted', async () => {
+    source = await createMockServer({ plugins: PLUGINS });
+    const sdb = source.db;
+    await createGeneralCollection(sdb, 'Items', 'Items', [{ name: 'Name', type: 'string', interface: 'input' }]);
+    // A key column left behind after its relation field was deleted: still marked as foreign key, used by nothing.
+    await sdb.getRepository('fields').create({
+      values: { collectionName: 'Items', name: 'f_old', type: 'bigInt', interface: 'integer', isForeignKey: true },
+      context: {},
+    });
+    await sdb.getRepository('Items').create({ values: { Name: 'Ring', f_old: 42 } });
+    zipPath = (await new CollectionExporter(source).export({ collections: ['Items'], includeData: true })).filePath;
+    await source.destroy();
+    source = null;
+
+    target = await createMockServer({ plugins: PLUGINS });
+    const importer = new CollectionImporter(target);
+    const token = await importer.receive(zipPath);
+    expect((await importer.preview(token)).problems).toEqual([]);
+    await importer.import(token);
+    const item = await target.db.getRepository('Items').findOne();
+    expect(Number(item.get('f_old'))).toBe(42);
+  });
+
+  it('fills every field of a column shared by two fields when the naming differs', async () => {
+    source = await createMockServer({ plugins: PLUGINS, database: { underscored: true } });
+    const sdb = source.db;
+    await createGeneralCollection(sdb, 'Statement', 'Statement', [
+      { name: 'Amount', type: 'double', interface: 'number' },
+    ]);
+    // As after "sync from database": the key column of "Created by" also has a plain field of its own.
+    await sdb.getRepository('fields').create({
+      values: {
+        collectionName: 'Statement',
+        name: 'created_by_id',
+        type: 'bigInt',
+        interface: 'integer',
+        field: 'created_by_id',
+      },
+      context: {},
+    });
+    await sdb.getRepository('Statement').create({ values: { Amount: 5 } });
+    zipPath = (await new CollectionExporter(source).export({ collections: ['Statement'], includeData: true })).filePath;
+    await source.destroy();
+    source = null;
+
+    target = await createMockServer({ plugins: PLUGINS });
+    const importer = new CollectionImporter(target);
+    const token = await importer.receive(zipPath);
+    expect((await importer.preview(token)).problems).toEqual([]);
+    await importer.import(token);
+    const row = await target.db.getRepository('Statement').findOne();
+    expect(row.get('Amount')).toBe(5);
   });
 
   it('asks for a re-export when an older package lacks the primary key field', async () => {

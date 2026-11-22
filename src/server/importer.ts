@@ -16,22 +16,28 @@ import {
   COLLECTIONS_FILE,
   CollectionPayload,
   dataDir,
+  DATALESS_TEMPLATES,
   DataMeta,
-  findUnsafeExpressionInUi,
+  findUnsafeTextsInUi,
   FORMAT_VERSION,
   isValidName,
+  isVirtual,
   Manifest,
   MANIFEST_FILE,
   MAX_IDENTIFIER_LENGTH,
   MIRRORED_ORIGINS,
+  sqlProblem,
   SUPPORTED_TEMPLATES,
+  TEMPLATE_PLUGINS,
+  templateOf,
   THROUGH_FILE,
 } from './package-format';
 
 const TOKEN_PATTERN = /^[0-9a-f-]{36}$/;
 
 // Collection options that would place a collection somewhere other than its own new table, or bypass NocoBase's
-// "already exists" check (isThrough). Exports never contain them; a package that does is refused.
+// "already exists" check (isThrough). Exports never contain them; a package that does is refused, except the options a
+// template needs (TEMPLATE_OPTIONS), which are checked separately.
 const PLACEMENT_OPTIONS = [
   'tableName',
   'schema',
@@ -43,6 +49,12 @@ const PLACEMENT_OPTIONS = [
   'autoCreate',
   'dataSourceKey',
 ];
+const TEMPLATE_OPTIONS: Record<string, string[]> = {
+  // A view collection points at an existing database view (checked: missingView).
+  view: ['view', 'viewName', 'schema'],
+  // A SQL collection runs its read-only query (checked: unsafeSql, and listed for the admin to confirm).
+  sql: ['sql'],
+};
 // Bookkeeping keys stripped from payloads before create, so a package cannot point rows at other records.
 const NESTED_FIELD_STRIP = ['key', 'sort', 'collectionName', 'parentKey', 'reverseKey', 'reverseField', 'children'];
 const ASSOCIATION_STRIP = ['key', 'sort', 'parentKey', 'reverseKey', 'children'];
@@ -53,7 +65,7 @@ const ASSOCIATION_TYPES_FOR_REFERENCES = ['belongsTo', 'hasOne', 'hasMany', 'bel
 
 // Only these entries are extracted from an uploaded package; anything else is ignored.
 const ALLOWED_ENTRY =
-  /^(manifest\.json|schema\/(collections|associations|through)\.json|data\/[A-Za-z_][A-Za-z0-9_]*\/(meta|data))$/;
+  /^(manifest\.json|schema\/(collections|associations|through)\.json|data\/[A-Za-z_][A-Za-z0-9_-]*\/(meta|data))$/;
 
 export type ProblemCode =
   | 'formatVersion'
@@ -72,7 +84,19 @@ export type ProblemCode =
   | 'columnsMismatch'
   | 'systemCollection'
   | 'expressionsNotConfirmed'
-  | 'missingPrimaryKey';
+  | 'missingPrimaryKey'
+  | 'missingTemplatePlugin'
+  | 'inheritanceNeedsPostgres'
+  | 'missingView'
+  | 'missingDatabaseServer'
+  | 'missingStorage'
+  | 'unsafeSql'
+  // Notices (not blocking)
+  | 'filesNotCarried'
+  | 'dataNotCarried'
+  | 'relationRowsNotCarried'
+  // Listed for confirmation together with expressions
+  | 'sqlStatement';
 
 /** What to do with a collection from the package that already exists in this environment. */
 export const CONFLICT_MODES = ['skipCollectionImportData', 'skipAll', 'overrideSchema', 'overrideAll'] as const;
@@ -120,8 +144,11 @@ export interface Preview {
   missingPlugins: string[];
   // Collections from the package that already exist here; each needs a ConflictMode on import.
   conflicts: PreviewConflict[];
-  // Expressions in titles/descriptions/UI schemas; the import runs only after the admin confirms they trust the file.
+  // Expressions in titles/descriptions/UI schemas and SQL queries; the import runs only after the admin confirms they
+  // trust the file.
   expressions: Problem[];
+  // What the import will not do, for the admin to know (not blocking).
+  notices: Problem[];
 }
 
 export interface ImportResult {
@@ -186,6 +213,10 @@ async function* readRows(filePath: string, maxRowBytes: number): AsyncGenerator<
   }
   const last = pieces.join('');
   if (last.trim()) yield last;
+}
+
+function isConventionalTableName(name: string, tableName: unknown) {
+  return tableName === name || tableName === snakeCase(name);
 }
 
 export class ImportBlockedError extends Error {
@@ -378,7 +409,52 @@ export class CollectionImporter {
       missingPlugins: this.missingPlugins(pkg.manifest),
       conflicts: await this.conflicts(pkg),
       expressions: this.expressionsOf(pkg),
+      notices: this.noticesOf(pkg),
     };
+  }
+
+  /** Things the import does not carry, so the admin is not surprised afterwards. */
+  private noticesOf(pkg: LoadedPackage): Problem[] {
+    const notices: Problem[] = [];
+    for (const collection of pkg.collections) {
+      const template = templateOf(collection);
+      if (template === 'file' && pkg.metas[collection.name]?.count) {
+        notices.push({ code: 'filesNotCarried', collection: collection.name });
+      }
+      if (pkg.manifest.includeData && DATALESS_TEMPLATES.includes(template)) {
+        notices.push({ code: 'dataNotCarried', collection: collection.name, detail: template });
+      }
+    }
+    for (const junction of this.externalJunctions(pkg)) {
+      if (pkg.metas[junction.through]?.count) {
+        notices.push({
+          code: 'relationRowsNotCarried',
+          collection: junction.collection,
+          field: junction.field,
+          detail: junction.target,
+        });
+      }
+    }
+    return notices;
+  }
+
+  /** Junction tables of many-to-many fields whose target is outside the package. */
+  private externalJunctions(pkg: LoadedPackage) {
+    const own = new Set(pkg.manifest.collections);
+    return pkg.associations
+      .filter(
+        (association) =>
+          association.type === 'belongsToMany' &&
+          typeof association.through === 'string' &&
+          pkg.through.includes(association.through) &&
+          !own.has(association.target),
+      )
+      .map((association) => ({
+        through: association.through as string,
+        collection: association.collectionName,
+        field: association.name,
+        target: association.target,
+      }));
   }
 
   /**
@@ -466,7 +542,12 @@ export class CollectionImporter {
       for (const collection of pkg.collections) {
         if (!create.has(collection.name)) continue;
         const values = {
-          ...lodash.omit(collection, ['key', 'sort', 'category']),
+          ...lodash.omit(collection, [
+            'key',
+            'sort',
+            'category',
+            ...(isConventionalTableName(collection.name, collection.tableName) ? ['tableName'] : []),
+          ]),
           fields: collection.fields.map((field) => lodash.omit(field, NESTED_FIELD_STRIP)),
         };
         await collectionsRepository.create({ values, context: {}, transaction });
@@ -512,25 +593,50 @@ export class CollectionImporter {
       }
 
       await this.assertHookResults(createdAssociations, throughCreate, transaction);
-      await this.assertColumns(pkg, [...create, ...throughCreate], transaction);
+      const datalessNames = new Set(
+        pkg.collections.filter((c) => DATALESS_TEMPLATES.includes(templateOf(c))).map((c) => c.name),
+      );
+      await this.assertColumns(
+        pkg,
+        [...create, ...throughCreate].filter((name) => !datalessNames.has(name)),
+        transaction,
+      );
 
       const userId = options.userId ?? null;
+      const storageIds = await this.storageIdMap(pkg, transaction);
       for (const name of create) {
-        if (wantsData(name)) rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId);
-      }
-      for (const name of skipped) {
-        if (wantsData(name)) {
-          rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId, true);
+        if (wantsData(name) && !datalessNames.has(name)) {
+          rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId, false, storageIds);
         }
       }
+      for (const name of skipped) {
+        if (wantsData(name) && !datalessNames.has(name)) {
+          rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId, true, storageIds);
+        }
+      }
+      // Links to records of collections outside the package (e.g. attachments, users) are not imported: those ids
+      // identify other records here.
+      const external = new Set(this.externalJunctions(pkg).map((junction) => junction.through));
       for (const name of throughCreate) {
-        if (wantsData(owners[name]))
+        if (wantsData(owners[name]) && !external.has(name))
           rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId);
       }
       for (const name of throughAppend) {
-        if (manifest.includeData) {
+        if (manifest.includeData && !external.has(name)) {
           await this.assertColumnsSubset(name, pkg.metas[name], transaction);
           rowCounts[name] = await this.insertRows(token, name, pkg.metas[name], transaction, userId, true);
+        }
+      }
+
+      // Rows are bulk-inserted without model hooks, so derived state is rebuilt afterwards: sequences (parents after
+      // their inherited children, whose ids come from the parent's sequence) and the path table of tree collections.
+      const filled = Object.keys(rowCounts).filter((name) => rowCounts[name] > 0);
+      for (const name of [...filled].reverse()) {
+        await this.resetSequence(this.db.getCollection(name), transaction);
+      }
+      for (const collection of pkg.collections) {
+        if (templateOf(collection) === 'tree' && filled.includes(collection.name)) {
+          await this.rebuildTreePaths(collection.name, transaction);
         }
       }
 
@@ -589,7 +695,8 @@ export class CollectionImporter {
 
       let missingColumns: string[] = [];
       const collection = this.db.getCollection(name);
-      if (collection && pkg.metas[name]) {
+      const payload = pkg.collections.find((c) => c.name === name);
+      if (collection && pkg.metas[name] && !DATALESS_TEMPLATES.includes(templateOf(payload || {}))) {
         const live = await this.db.sequelize.getQueryInterface().describeTable(collection.getTableNameWithSchema());
         missingColumns = pkg.metas[name].columns.filter((column) => !(column in live));
       }
@@ -667,6 +774,12 @@ export class CollectionImporter {
               Object.entries(meta.attributes).every(
                 ([column, attribute]) => meta.columns.includes(column) && isValidName(attribute),
               ))) &&
+          (meta.aliases === undefined ||
+            (typeof meta.aliases === 'object' &&
+              Object.entries(meta.aliases).every(
+                ([column, names]) =>
+                  meta.columns.includes(column) && Array.isArray(names) && names.every((n) => isValidName(n)),
+              ))) &&
           Number.isInteger(meta.count) &&
           meta.count >= 0;
         if (valid) metas[name] = meta;
@@ -687,10 +800,10 @@ export class CollectionImporter {
   private expressionsOf(pkg: LoadedPackage): Problem[] {
     const found: Problem[] = [];
     const scan = (collection: string, entry: Record<string, unknown> | undefined) => {
-      const expression = findUnsafeExpressionInUi(entry);
-      if (expression) {
-        const field = entry?.name !== collection ? (entry?.name as string) : undefined;
-        found.push({ code: 'unsafeExpression', collection, field, detail: expression.slice(0, 120) });
+      // Every affected text, in full: the admin confirms exactly what will be imported, nothing hidden by a cut-off.
+      const field = entry?.name !== collection ? (entry?.name as string) : undefined;
+      for (const text of findUnsafeTextsInUi(entry)) {
+        found.push({ code: 'unsafeExpression', collection, field, detail: text });
       }
     };
     for (const collection of pkg.collections) {
@@ -700,6 +813,12 @@ export class CollectionImporter {
     for (const association of pkg.associations) {
       scan(String(association.collectionName), association);
       scan(String(association.target), association.reverseField);
+    }
+    // A SQL collection runs its query against this database whenever it is read.
+    for (const collection of pkg.collections) {
+      if (templateOf(collection) === 'sql' && typeof collection.sql === 'string') {
+        found.push({ code: 'sqlStatement', collection: collection.name, detail: collection.sql });
+      }
     }
     return found;
   }
@@ -750,16 +869,16 @@ export class CollectionImporter {
         } else if (!(await this.isOwnedJunction(name, owners[name]))) {
           problems.push({ code: 'collectionExists', collection: name });
         }
-      } else if (existingTables.has(this.expectedTableName(name))) {
+      } else if (
+        !['view', 'sql'].includes(templateOf(pkg.collections.find((c) => c.name === name) || {})) &&
+        existingTables.has(this.expectedTableName(name))
+      ) {
         problems.push({ code: 'tableExists', collection: name });
       }
     }
 
+    await this.checkTemplates(pkg, problems);
     for (const collection of pkg.collections) {
-      const template = (collection.template as string) || 'general';
-      if (!SUPPORTED_TEMPLATES.includes(template) || !lodash.isEmpty(collection.inherits)) {
-        problems.push({ code: 'unsupportedTemplate', collection: collection.name, detail: template });
-      }
       for (const field of collection.fields) {
         this.checkField(field, collection.name, problems);
       }
@@ -831,11 +950,23 @@ export class CollectionImporter {
     }
 
     for (const collection of pkg.collections) {
+      const allowed = TEMPLATE_OPTIONS[templateOf(collection)] || [];
       for (const option of PLACEMENT_OPTIONS) {
         const value = collection[option];
         if (value === undefined || value === null || value === false) continue;
-        if (option === 'tableName' && value === collection.name) continue;
+        if (allowed.includes(option)) continue;
+        // A table name equal to the collection name or its snake_case only records the naming convention of the source
+        // (DB_UNDERSCORED); it is dropped on import so the target uses its own convention.
+        if (option === 'tableName' && isConventionalTableName(collection.name, value)) continue;
         outside(collection.name, `option "${option}" is not allowed`);
+      }
+      // Inherited collections (PostgreSQL): every parent is part of the package and created before the child.
+      const parents = lodash.castArray((collection.inherits as unknown) || []);
+      const position = manifest.collections.indexOf(collection.name);
+      for (const parent of parents) {
+        if (typeof parent !== 'string' || !own.has(parent) || manifest.collections.indexOf(parent) > position) {
+          outside(collection.name, `parent "${String(parent)}" must come earlier in the package`);
+        }
       }
       // Fields nested in a collection are plain columns; relations are only accepted from associations.json, where the
       // checks below apply. A relation hidden here could otherwise point at collections outside the package.
@@ -876,8 +1007,17 @@ export class CollectionImporter {
         outside(collectionName, `target "${target}" is neither in the package nor a declared dependency`, name);
       }
       // hasMany/hasOne keep their key column on the target; a reverse field is created on the target.
+      // hasMany/hasOne keep their key column on the target. Into an existing collection outside the package this is
+      // allowed only when the key column is new (an empty column is added) or is the target's primary key; taking over
+      // any other existing column is refused.
       if ((type === 'hasMany' || type === 'hasOne') && !own.has(target)) {
-        outside(collectionName, `would add a key column to "${target}"`, name);
+        const targetCollection = dependencies.has(target) ? this.db.getCollection(target) : undefined;
+        const key = association.foreignKey;
+        const keyIsSafe =
+          !!targetCollection &&
+          isValidName(key) &&
+          (!targetCollection.model.getAttributes()[key] || targetCollection.model.primaryKeyAttribute === key);
+        if (!keyIsSafe) outside(collectionName, `would add a key column to "${target}"`, name);
       }
       if (reverseField && !own.has(target)) {
         outside(collectionName, `would add a field to "${target}"`, name);
@@ -897,6 +1037,130 @@ export class CollectionImporter {
       if (typeof identifier === 'string' && identifier.length > MAX_IDENTIFIER_LENGTH) {
         problems.push({ code: 'identifierTooLong', collection: collectionName, field: name, detail: identifier });
       }
+    }
+  }
+
+  /** What each collection's template needs in this environment (its plugin, a view, a server, storages). */
+  private async checkTemplates(pkg: LoadedPackage, problems: Problem[]) {
+    const enabled = new Set(enabledPluginNames(this.app));
+    const isEnabled = (plugin: string) => enabled.has(plugin) || enabled.has(plugin.replace('@nocobase/plugin-', ''));
+    for (const collection of pkg.collections) {
+      const { name } = collection;
+      const template = templateOf(collection);
+      if (!SUPPORTED_TEMPLATES.includes(template)) {
+        problems.push({ code: 'unsupportedTemplate', collection: name, detail: template });
+        continue;
+      }
+      const plugin = TEMPLATE_PLUGINS[template];
+      if (plugin && !isEnabled(plugin)) {
+        problems.push({ code: 'missingTemplatePlugin', collection: name, detail: plugin });
+        continue;
+      }
+      if (!lodash.isEmpty(collection.inherits) && !this.db.inDialect('postgres')) {
+        problems.push({ code: 'inheritanceNeedsPostgres', collection: name });
+      }
+      if (template === 'view') {
+        const viewName = collection.viewName ?? name;
+        const schema = collection.schema ?? undefined;
+        if (!isValidName(viewName) || (schema !== undefined && !isValidName(schema))) {
+          problems.push({ code: 'invalidName', collection: name, detail: String(viewName) });
+        } else if (!(await this.viewExists(viewName, schema as string | undefined))) {
+          problems.push({ code: 'missingView', collection: name, detail: viewName });
+        }
+      }
+      if (template === 'sql') {
+        const reason = sqlProblem(collection.sql);
+        if (reason) problems.push({ code: 'unsafeSql', collection: name, detail: reason });
+      }
+      if (template === 'foreign') {
+        const server = collection.remoteServerName;
+        const found =
+          typeof server === 'string' &&
+          this.db.hasCollection('databaseServers') &&
+          (await this.db.getRepository('databaseServers').count({ filter: { name: server } })) > 0;
+        if (!found) problems.push({ code: 'missingDatabaseServer', collection: name, detail: String(server) });
+      }
+      if (template === 'file') {
+        // The storage the collection uploads to, and the storages its records are in, are matched by name.
+        const needed = new Set(Object.values(pkg.manifest.storages || {}));
+        if (typeof collection.storage === 'string' && collection.storage) needed.add(collection.storage);
+        const here = await this.storageIdsByName();
+        for (const storage of needed) {
+          if (!here.has(storage)) problems.push({ code: 'missingStorage', collection: name, detail: storage });
+        }
+      }
+    }
+  }
+
+  private async viewExists(viewName: string, schema?: string) {
+    const queryInterface = this.db.queryInterface as unknown as {
+      listViews(options?: { schema?: string }): Promise<{ name: string }[]>;
+    };
+    const views = await queryInterface.listViews(schema ? { schema } : undefined);
+    return views.some((view) => view.name === viewName);
+  }
+
+  private async storageIdsByName(transaction?: Transaction): Promise<Map<string, unknown>> {
+    if (!this.db.hasCollection('storages')) return new Map();
+    const storages = await this.db.getRepository('storages').find({ fields: ['id', 'name'], transaction });
+    return new Map(storages.map((storage) => [String(storage.get('name')), storage.get('id')]));
+  }
+
+  /** Source storage id → storage id here (same name), for the records of file collections. */
+  private async storageIdMap(pkg: LoadedPackage, transaction: Transaction) {
+    if (!pkg.manifest.storages) return undefined;
+    const here = await this.storageIdsByName(transaction);
+    const map = new Map<string, unknown>();
+    for (const [sourceId, name] of Object.entries(pkg.manifest.storages)) {
+      if (here.has(name)) map.set(sourceId, here.get(name));
+    }
+    return map;
+  }
+
+  /**
+   * Tree collections keep each node's path in a companion table (`main_<name>_path`), maintained by model hooks that
+   * the bulk insert does not run. Rebuilt here from the parent keys, the same way NocoBase builds a path.
+   */
+  private async rebuildTreePaths(name: string, transaction: Transaction) {
+    const pathName = `main_${name}_path`;
+    if (!this.db.hasCollection(pathName)) return;
+    const collection = this.db.getCollection(name) as Collection & { treeParentField?: { foreignKey?: string } };
+    const tk = collection.filterTargetKey as string;
+    const parentKey = collection.treeParentField?.foreignKey || 'parentId';
+    const rows = (await collection.model.findAll({
+      attributes: [tk, parentKey],
+      raw: true,
+      transaction,
+    })) as unknown as Record<string, unknown>[];
+
+    const parentOf = new Map(rows.map((row) => [String(row[tk]), row[parentKey]]));
+    const pathOf = new Map<string, string>();
+    for (const row of rows) {
+      // Walk up to a node whose path is known (or the root), then fill the paths on the way back down.
+      const chain: string[] = [];
+      const seen = new Set<string>();
+      let current: string | undefined = String(row[tk]);
+      while (current !== undefined && !pathOf.has(current) && !seen.has(current)) {
+        seen.add(current);
+        chain.push(current);
+        const parent = parentOf.get(current);
+        current = parent === null || parent === undefined || !parentOf.has(String(parent)) ? undefined : String(parent);
+      }
+      let prefix = current !== undefined && pathOf.has(current) ? pathOf.get(current) : '';
+      for (const node of chain.reverse()) {
+        prefix = `${prefix}/${node}`;
+        pathOf.set(node, prefix);
+      }
+    }
+
+    const model = this.db.getModel(pathName);
+    await model.destroy({ where: {}, transaction });
+    const records = rows.map((row) => {
+      const nodePath = pathOf.get(String(row[tk]));
+      return { nodePk: row[tk], path: nodePath, rootPk: nodePath.split('/')[1] || null };
+    });
+    for (let i = 0; i < records.length; i += INSERT_CHUNK_SIZE) {
+      await model.bulkCreate(records.slice(i, i + INSERT_CHUNK_SIZE), { transaction });
     }
   }
 
@@ -926,9 +1190,10 @@ export class CollectionImporter {
   private async assertHookResults(associations: AssociationPayload[], through: string[], transaction: Transaction) {
     const missing: string[] = [];
 
+    // A junction table needs no collection row: NocoBase creates one only for m2m fields; others (e.g. attachment
+    // fields) define it from the relation. Its key columns are verified in the database by assertColumns.
     for (const name of through) {
-      const exists = await this.db.getRepository('collections').count({ filter: { name }, transaction });
-      if (!exists || !this.db.hasCollection(name)) missing.push(`collection ${name}`);
+      if (!this.db.hasCollection(name)) missing.push(`collection ${name}`);
     }
 
     const expectFk = async (collectionName: string, fieldName: unknown) => {
@@ -938,7 +1203,8 @@ export class CollectionImporter {
       const exists = await this.db
         .getRepository('fields')
         .count({ filter: { collectionName, name: fieldName }, transaction });
-      if (!exists && !collection.getField(fieldName)) missing.push(`field ${collectionName}.${fieldName}`);
+      const defined = exists || collection.getField(fieldName) || collection.model.getAttributes()[fieldName];
+      if (!defined) missing.push(`field ${collectionName}.${fieldName}`);
     };
 
     for (const association of associations) {
@@ -965,21 +1231,31 @@ export class CollectionImporter {
     const attributes = this.db.getCollection(name).model.getAttributes();
     const targetByKey = new Map<string, string>();
     for (const [attributeName, attribute] of Object.entries(attributes)) {
+      if (isVirtual(attribute)) continue;
       const column = attribute.field || attributeName;
       for (const key of [column, attributeName, snakeCase(attributeName)]) {
         if (!targetByKey.has(key)) targetByKey.set(key, column);
       }
     }
-    const map = new Map<string, string>();
+    // Package column → target columns. A column shared by several fields in the source can be several columns here
+    // (e.g. when the naming differs); each of them gets the value.
+    const map = new Map<string, string[]>();
+    const used = new Set<string>();
     const unmapped: string[] = [];
     for (const column of meta.columns) {
-      const attributeName = meta.attributes?.[column];
-      const target = (attributeName && targetByKey.get(attributeName)) || targetByKey.get(column);
-      if (target && ![...map.values()].includes(target)) map.set(column, target);
-      else unmapped.push(column);
+      const lookup = (names: string[]) =>
+        [...new Set(names.map((name) => targetByKey.get(name)).filter(Boolean))].filter((target) => !used.has(target));
+      // By field name first; by column name for older packages without field names.
+      let targets = lookup([meta.attributes?.[column], ...(meta.aliases?.[column] || [])].filter(Boolean));
+      if (!targets.length) targets = lookup([column]);
+      if (!targets.length) {
+        unmapped.push(column);
+        continue;
+      }
+      targets.forEach((target) => used.add(target));
+      map.set(column, targets);
     }
-    const targetColumns = new Set(Object.values(attributes).map((attribute) => attribute.field));
-    return { map, unmapped, targetColumns };
+    return { map, unmapped };
   }
 
   private async liveColumns(name: string, transaction: Transaction) {
@@ -998,7 +1274,7 @@ export class CollectionImporter {
   private async assertColumnsSubset(name: string, meta: DataMeta, transaction: Transaction) {
     const { map, unmapped } = this.mapColumns(name, meta);
     const live = await this.liveColumns(name, transaction);
-    const missing = [...unmapped, ...[...map.values()].filter((column) => !live.has(column))];
+    const missing = [...unmapped, ...[...map.values()].flat().filter((column) => !live.has(column))];
     if (missing.length) {
       throw new Error(`Columns missing in ${name}: ${missing.join(', ')}`);
     }
@@ -1013,7 +1289,7 @@ export class CollectionImporter {
       const meta = pkg.metas[name];
       const { map, unmapped } = this.mapColumns(name, meta);
       const live = await this.liveColumns(name, transaction);
-      const mapped = new Set(map.values());
+      const mapped = new Set([...map.values()].flat());
 
       if (pkg.through.includes(name)) {
         const attributes = this.db.getCollection(name).model.getAttributes();
@@ -1050,6 +1326,7 @@ export class CollectionImporter {
     transaction: Transaction,
     importingUserId: string | number | null,
     intoExisting = false,
+    storageIds?: Map<string, unknown>,
   ): Promise<number> {
     const dataPath = path.join(this.packageDir(token), dataDir(name), 'data');
     const exists = await fsPromises
@@ -1081,6 +1358,10 @@ export class CollectionImporter {
       if (foreignKey) userColumns.add(attributes[foreignKey]?.field || foreignKey);
     }
 
+    // File collections: records point at the storage with the same name here (see storageIdMap).
+    const storageColumn =
+      storageIds && collection.options.template === 'file' ? attributes.storageId?.field || 'storageId' : undefined;
+
     const countRows = () => collection.repository.count({ transaction });
     const before = intoExisting ? await countRows() : 0;
     // Sequelize's bulk insert query honours ignoreDuplicates (ON CONFLICT DO NOTHING on Postgres); its typings omit it.
@@ -1104,21 +1385,22 @@ export class CollectionImporter {
       }
       const record: Record<string, unknown> = {};
       meta.columns.forEach((sourceColumn, index) => {
-        const column = targetColumnOf.get(sourceColumn);
-        if (!column) return;
-        const field = collection.getField(attributeByColumn.get(column));
-        if (userColumns.has(column)) {
-          record[column] = importingUserId;
-          return;
+        for (const column of targetColumnOf.get(sourceColumn) || []) {
+          const field = collection.getField(attributeByColumn.get(column));
+          if (userColumns.has(column)) {
+            record[column] = importingUserId;
+          } else if (column === storageColumn) {
+            record[column] = values[index] === null ? null : storageIds.get(String(values[index])) ?? null;
+          } else {
+            record[column] = field ? FieldValueWriter.write(field, values[index], this.db) : values[index];
+          }
         }
-        record[column] = field ? FieldValueWriter.write(field, values[index], this.db) : values[index];
       });
       batch.push(record);
       if (batch.length >= INSERT_CHUNK_SIZE) await flush();
     }
     await flush();
 
-    await this.resetSequence(collection, transaction);
     return intoExisting ? (await countRows()) - before : count;
   }
 

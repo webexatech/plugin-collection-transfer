@@ -82,12 +82,18 @@ The import is blocked when:
 - a field type is not available in the target (a plugin that adds a server-side type is missing)
 - a field kind is not available in the target UI (e.g. the *Code* field without `plugin-field-code`); the plugins
   enabled in the source but not in the target are listed as a hint
-- a database table with the same name exists without a collection, or a collection uses an unsupported template
+- a database table with the same name exists without a collection, or a collection uses a template from a
+  third-party plugin
+- a collection's template needs a plugin that is not enabled in the target (e.g. *Tree collection* without
+  `plugin-collection-tree`), or something that must already exist there: the database view of a view collection, the
+  database server of an FDW collection, the file storage (by name) of a file collection
+- an inherited collection is imported into MySQL/MariaDB (inheritance needs PostgreSQL)
+- the query of a SQL collection is anything but one read-only `SELECT` / `WITH … SELECT`
 - the file has an unsupported format version, or a name is too long for the database
 - the file tries to change anything outside its own collections (other tables, fields on other collections)
 - (needs confirmation) a title, description or UI schema contains a `{{ }}` expression other than a plain
   `{{t("…")}}` translation; the preview lists them and the import runs only after you tick **I trust this file**
-  (formula expressions themselves are not affected)
+  (formula expressions themselves are not affected); the queries of SQL collections are listed the same way
 - the file is not a valid package
 
 The same checks run again when you click **Import**, in case the target changed after the preview.
@@ -98,12 +104,25 @@ By design, the plugin moves **collection definitions and their rows only**. It d
 
 - pages, blocks and menus (UI schemas), workflows, role permissions, collection categories
 - files behind attachment fields (the attachment records reference storage that differs per environment)
+- links of many-to-many fields to collections outside the file (e.g. attachment fields, many-to-many to users): the
+  fields are created, but their links are not imported, because those record ids identify other records in the target
 - relation fields that live on collections outside the file
 
 Recreate those in the target, or use NocoBase's own tools for them.
 
-**Collection types:** this edition transfers **general collections**. Tree, file, calendar, SQL, view, inherited,
-FDW and expression collections are listed but cannot be selected.
+**Collection types:** every template that ships with NocoBase is transferred:
+
+| Template | Definition | Rows | Notes |
+| --- | --- | --- | --- |
+| General, Calendar, Comment, Expression | yes | yes | |
+| Tree | yes | yes | node paths are rebuilt in the target |
+| File | yes | file records | the files themselves are not copied; records point at the storage with the same name, which must be reachable from the target (e.g. a shared S3 bucket) |
+| Inherited (PostgreSQL) | yes | yes | parents are added to the export automatically and created first |
+| SQL | yes | — | the query runs against the target's tables |
+| View | yes | — | the database view must already exist in the target |
+| Foreign data (FDW) | yes | — | the database server must already exist in the target |
+
+Collections of templates added by third-party plugins are listed but cannot be selected.
 
 ## Known limitations
 

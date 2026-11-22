@@ -392,7 +392,8 @@ describe('collection importer', () => {
         name: 'owners',
         type: 'hasMany',
         target: 'users',
-        foreignKey: 'projectRef',
+        // Taking over an existing column of a collection outside the package (a new key column would be allowed).
+        foreignKey: 'email',
       });
       associations.push({
         collectionName: 'tags',
