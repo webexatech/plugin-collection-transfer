@@ -92,6 +92,54 @@ describe('import security', () => {
     await expect(importer.import(token)).rejects.toBeInstanceOf(ImportBlockedError);
   });
 
+  it('refuses relation fields hidden among the plain fields of a collection', async () => {
+    const { importer, token } = await tampered(async (dir) => {
+      await rewrite(path.join(dir, COLLECTIONS_FILE), (c: Row[]) => {
+        (c[0].fields as Row[]).push({ name: 'owners', type: 'hasMany', target: 'users', foreignKey: 'evilProjectId' });
+      });
+    });
+    const preview = await importer.preview(token);
+    expect(preview.problems).toContainEqual({
+      code: 'outsidePackage',
+      collection: 'projects',
+      field: 'owners',
+      detail: 'relation fields are only allowed in associations.json',
+    });
+    await expect(importer.import(token)).rejects.toBeInstanceOf(ImportBlockedError);
+    const usersColumns = await target.db.sequelize.getQueryInterface().describeTable('users');
+    expect(Object.keys(usersColumns)).not.toContain('evilProjectId');
+  });
+
+  it('refuses archive entries beyond the size limit', async () => {
+    const original = { ...CollectionImporter.limits };
+    CollectionImporter.limits = { ...original, maxEntryBytes: 64 };
+    try {
+      await expect(new CollectionImporter(target).receive(zipPath)).rejects.toThrow(/Package refused/);
+    } finally {
+      CollectionImporter.limits = original;
+    }
+  });
+
+  it('stops an import at a data row larger than the row limit, leaving nothing behind', async () => {
+    const { importer, token } = await tampered(async (dir) => {
+      await rewrite(path.join(dir, MANIFEST_FILE), (m) => {
+        m.includeData = true;
+      });
+      const metaPath = path.join(dir, 'data/tags/meta');
+      const meta = JSON.parse(await fsPromises.readFile(metaPath, 'utf8'));
+      await fsPromises.writeFile(metaPath, JSON.stringify({ ...meta, count: 1 }));
+      await fsPromises.writeFile(path.join(dir, 'data/tags/data'), JSON.stringify(['x'.repeat(5000)]) + '\n');
+    });
+    const original = { ...CollectionImporter.limits };
+    CollectionImporter.limits = { ...original, maxRowBytes: 1024 };
+    try {
+      await expect(importer.import(token)).rejects.toThrow(/larger than the allowed row size/);
+    } finally {
+      CollectionImporter.limits = original;
+    }
+    expect(target.db.hasCollection('tags')).toBe(false);
+  });
+
   it('refuses archives that expand far beyond their size before extracting them', async () => {
     const original = { ...CollectionImporter.limits };
     CollectionImporter.limits = { ...original, ratioCheckBytes: 1024 * 1024, maxCompressionRatio: 10 };

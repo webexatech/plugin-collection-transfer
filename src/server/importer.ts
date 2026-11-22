@@ -1,13 +1,11 @@
 import { Collection, Database, Transaction } from '@nocobase/database';
 import { Application } from '@nocobase/server';
 import { storagePathJoin } from '@nocobase/utils';
-import decompress from '@xhmikosr/decompress';
 import crypto from 'crypto';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
 import lodash from 'lodash';
 import path from 'path';
-import readline from 'readline';
 import { QueryInterface, QueryTypes } from 'sequelize';
 import yauzl from 'yauzl';
 import { enabledPluginNames } from './exporter';
@@ -148,6 +146,30 @@ interface CollectionRepositoryWithLoad {
   load(options: { filter: Record<string, unknown> }): Promise<void>;
 }
 
+/**
+ * Yields the non-empty lines of an NDJSON file without ever holding more than one line (up to `maxRowBytes`) in
+ * memory, so a single huge line cannot exhaust memory.
+ */
+async function* readRows(filePath: string, maxRowBytes: number): AsyncGenerator<string> {
+  const tooLarge = (text: string) => Buffer.byteLength(text) > maxRowBytes;
+  const rowTooLarge = () => new Error('A data row is larger than the allowed row size');
+  let pending = '';
+  for await (const chunk of fs.createReadStream(filePath, { encoding: 'utf8' })) {
+    pending += chunk as string;
+    let index = pending.indexOf('\n');
+    while (index >= 0) {
+      const line = pending.slice(0, index).replace(/\r$/, '');
+      pending = pending.slice(index + 1);
+      // Every complete row is checked, not only the unfinished remainder of a chunk.
+      if (tooLarge(line)) throw rowTooLarge();
+      if (line) yield line;
+      index = pending.indexOf('\n');
+    }
+    if (tooLarge(pending)) throw rowTooLarge();
+  }
+  if (pending.trim()) yield pending;
+}
+
 export class ImportBlockedError extends Error {
   constructor(public problems: Problem[]) {
     super(`Import blocked by ${problems.length} problem(s): ${problems.map((p) => p.code).join(', ')}`);
@@ -180,15 +202,72 @@ export class CollectionImporter {
     const dir = this.packageDir(token);
     await fsPromises.mkdir(dir, { recursive: true });
     try {
-      await decompress(zipPath, dir, {
-        filter: (entry) => entry.type === 'file' && ALLOWED_ENTRY.test(entry.path.replace(/\\/g, '/')),
-      });
+      await CollectionImporter.extractArchive(zipPath, dir);
       await fsPromises.access(path.join(dir, MANIFEST_FILE));
     } catch (error) {
       await fsPromises.rm(dir, { recursive: true, force: true });
-      throw new Error('Not a collection transfer package');
+      const message = error instanceof Error ? error.message : '';
+      throw new Error(message.startsWith('Package refused') ? message : 'Not a collection transfer package');
     }
     return token;
+  }
+
+  /**
+   * Extracts only the entries the package format defines, streaming each one to disk while counting bytes, and stops as
+   * soon as an entry or the whole package passes the limits. Nothing is buffered in memory.
+   */
+  static async extractArchive(zipPath: string, dir: string) {
+    const limits = CollectionImporter.limits;
+    let total = 0;
+    await new Promise<void>((resolve, reject) => {
+      yauzl.open(zipPath, { lazyEntries: true, autoClose: true }, (openError, zipfile) => {
+        if (openError || !zipfile) {
+          reject(openError || new Error('Not a collection transfer package'));
+          return;
+        }
+        const fail = (error: Error) => {
+          zipfile.close();
+          reject(error);
+        };
+        zipfile.on('error', fail);
+        zipfile.on('end', () => resolve());
+        zipfile.on('entry', (entry: yauzl.Entry) => {
+          const name = entry.fileName.replace(/\\/g, '/');
+          if (name.endsWith('/') || !ALLOWED_ENTRY.test(name)) {
+            zipfile.readEntry();
+            return;
+          }
+          zipfile.openReadStream(entry, (streamError, input) => {
+            if (streamError || !input) {
+              fail(streamError || new Error('Not a collection transfer package'));
+              return;
+            }
+            const target = path.join(dir, name);
+            let written = 0;
+            fsPromises
+              .mkdir(path.dirname(target), { recursive: true })
+              .then(() => {
+                const output = fs.createWriteStream(target);
+                input.on('data', (chunk: Buffer) => {
+                  written += chunk.length;
+                  total += chunk.length;
+                  if (written > limits.maxEntryBytes || total > limits.maxTotalBytes) {
+                    input.destroy();
+                    output.destroy();
+                    fail(new Error(`Package refused: ${name} expands beyond the size limit`));
+                  }
+                });
+                input.on('error', fail);
+                output.on('error', fail);
+                output.on('finish', () => zipfile.readEntry());
+                input.pipe(output);
+              })
+              .catch(fail);
+          });
+        });
+        zipfile.readEntry();
+      });
+    });
   }
 
   async discard(token: string) {
@@ -202,8 +281,10 @@ export class CollectionImporter {
     maxTotalBytes: 2 * 1024 * 1024 * 1024,
     // Only checked for entries above `ratioCheckBytes`; text compresses well, bombs compress absurdly well.
     maxCompressionRatio: 200,
-    ratioCheckBytes: 50 * 1024 * 1024,
+    ratioCheckBytes: 10 * 1024 * 1024,
     maxSchemaFileBytes: 50 * 1024 * 1024,
+    // One data row (one line of NDJSON).
+    maxRowBytes: 16 * 1024 * 1024,
   };
 
   /**
@@ -699,6 +780,17 @@ export class CollectionImporter {
         if (option === 'tableName' && value === collection.name) continue;
         outside(collection.name, `option "${option}" is not allowed`);
       }
+      // Fields nested in a collection are plain columns; relations are only accepted from associations.json, where the
+      // checks below apply. A relation hidden here could otherwise point at collections outside the package.
+      for (const field of collection.fields || []) {
+        const relationKeys = ['target', 'through', 'foreignKey', 'otherKey', 'sourceKey', 'targetKey'];
+        if (
+          ASSOCIATION_TYPES_FOR_REFERENCES.includes(field.type) ||
+          relationKeys.some((key) => field[key] !== undefined && field[key] !== null)
+        ) {
+          outside(collection.name, 'relation fields are only allowed in associations.json', field.name);
+        }
+      }
     }
 
     for (const association of pkg.associations) {
@@ -878,10 +970,11 @@ export class CollectionImporter {
       batch = [];
     };
 
-    const lines = readline.createInterface({ input: fs.createReadStream(dataPath), crlfDelay: Infinity });
-    for await (const line of lines) {
-      if (!line) continue;
-      const values = JSON.parse(line) as unknown[];
+    for await (const line of readRows(dataPath, CollectionImporter.limits.maxRowBytes)) {
+      const values = JSON.parse(line);
+      if (!Array.isArray(values)) {
+        throw new Error(`Invalid row in ${name}`);
+      }
       const record: Record<string, unknown> = {};
       meta.columns.forEach((column, index) => {
         const field = collection.getField(attributeByColumn.get(column));

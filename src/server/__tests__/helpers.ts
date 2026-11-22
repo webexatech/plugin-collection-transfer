@@ -1,6 +1,6 @@
 import { Database } from '@nocobase/database';
 import { createMockServer, MockServer } from '@nocobase/test';
-import decompress from '@xhmikosr/decompress';
+import { CollectionImporter } from '../importer';
 import fsPromises from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -184,7 +184,7 @@ export async function openPackage(zipPath: string) {
     os.tmpdir(),
     `collection-transfer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
-  await decompress(zipPath, dir);
+  await CollectionImporter.extractArchive(zipPath, dir);
   return {
     dir,
     async json<T>(relativePath: string): Promise<T> {

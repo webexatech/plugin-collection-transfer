@@ -2,6 +2,16 @@
 
 All notable changes to this plugin are documented here. Versions follow [semver](https://semver.org/).
 
+## 0.1.1 – NocoBase 2.2.x
+
+Security hardening of the import (upgrade recommended):
+
+- Relation fields are only accepted from `associations.json`; a relation hidden among a collection's plain fields is
+  refused, so a package cannot add fields or key columns to collections outside it.
+- Archives are extracted by streaming each allowed entry to disk with per-entry and total size limits instead of
+  decompressing into memory; the compression-ratio check now applies from 10 MB.
+- Data rows have a size limit (16 MB per row), so one oversized row cannot exhaust memory.
+
 ## 0.1.0 – NocoBase 2.2.x
 
 - Export one or more general collections, with or without data, to a `.zip` package.
